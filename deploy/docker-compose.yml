@@ -1,0 +1,116 @@
+services:
+  # Redis backs published guardrail snapshots.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    expose:
+      - "6379"
+    networks:
+      - umai-internal
+
+  # UMAI Engine - AI policy evaluation core.
+  umai-engine:
+    image: umai/umai-enterprise-engine:${UMAI_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      LICENSE_KEY: ${UMAI_LICENSE_KEY}
+      REDIS_URL: ${UMAI_REDIS_URL:-redis://redis:6379/0}
+      SNAPSHOT_SIGNING_KEY: ${UMAI_SNAPSHOT_SIGNING_KEY}
+    expose:
+      - "9000"
+    networks:
+      - umai-internal
+
+  # UMAI Service - REST API and business logic.
+  umai-service:
+    image: umai/umai-enterprise-service:${UMAI_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      - umai-engine
+      - redis
+    environment:
+      # License bootstrap.
+      DUVARAI_LICENSE_TOKEN: ${UMAI_LICENSE_KEY}
+      DUVARAI_LICENSE_PUBLIC_KEY: ${UMAI_LICENSE_PUBLIC_KEY}
+      DUVARAI_LICENSE_STRICT: ${UMAI_LICENSE_STRICT:-true}
+
+      # Engine connectivity.
+      DUVARAI_AI_ENGINE_BASE_URL: http://umai-engine:9000
+
+      # Internal service secrets.
+      DUVARAI_ADMIN_JWT_HS256_SECRET: ${UMAI_SERVICE_SECRET_KEY}
+      DUVARAI_EXTENSION_INGEST_JWT_HS256_SECRET: ${CC_EXTENSION_JWT_SECRET}
+
+      # Database.
+      DUVARAI_DATABASE_URL: ${UMAI_DATABASE_URL}
+
+      # CORS.
+      DUVARAI_CORS_ALLOW_ORIGINS: ${UMAI_CORS_ORIGINS:-http://localhost:3000}
+
+      # Redis-backed signed snapshot publishing.
+      DUVARAI_REDIS_URL: ${UMAI_REDIS_URL:-redis://redis:6379/0}
+      DUVARAI_REQUIRE_REDIS: "true"
+      DUVARAI_SNAPSHOT_SIGNING_KEY: ${UMAI_SNAPSHOT_SIGNING_KEY}
+      DUVARAI_SNAPSHOT_SIGNING_KEY_ID: ${UMAI_SNAPSHOT_SIGNING_KEY_ID:-default}
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    networks:
+      - umai-internal
+      - umai-public
+
+  # UMAI Control Center - operator web UI.
+  umai-control-center:
+    image: umai/umai-enterprise-control-center:${UMAI_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      - umai-service
+    ports:
+      - "${CC_HOST_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+
+      # Session.
+      CONTROL_CENTER_SESSION_SECRET: ${CC_SESSION_SECRET}
+      CONTROL_CENTER_SESSION_TTL_SECONDS: ${CC_SESSION_TTL_SECONDS:-43200}
+
+      # Backend connectivity.
+      CONTROL_CENTER_ADMIN_API_URL: http://umai-service:8080/api/v1/admin
+      CONTROL_CENTER_PUBLIC_API_URL: http://umai-service:8080/api/v1
+
+      # LDAP / Active Directory authentication.
+      LDAP_URL: ${LDAP_URL}
+      LDAP_BIND_DN: ${LDAP_BIND_DN}
+      LDAP_BIND_PASSWORD: ${LDAP_BIND_PASSWORD}
+      LDAP_USER_SEARCH_BASE: ${LDAP_USER_SEARCH_BASE}
+      LDAP_USERNAME_ATTRIBUTE: ${LDAP_USERNAME_ATTRIBUTE:-sAMAccountName}
+      LDAP_DISPLAY_NAME_ATTRIBUTE: ${LDAP_DISPLAY_NAME_ATTRIBUTE:-displayName}
+      LDAP_EMAIL_ATTRIBUTE: ${LDAP_EMAIL_ATTRIBUTE:-mail}
+      LDAP_ALLOWED_GROUPS: ${LDAP_ALLOWED_GROUPS:-}
+      LDAP_TIMEOUT_MS: ${LDAP_TIMEOUT_MS:-10000}
+      LDAP_CONNECT_TIMEOUT_MS: ${LDAP_CONNECT_TIMEOUT_MS:-10000}
+      LDAP_INSECURE_SKIP_VERIFY: ${LDAP_INSECURE_SKIP_VERIFY:-false}
+
+      # Organization / license metadata.
+      CONTROL_CENTER_ORGANIZATION_ID: ${UMAI_ORGANIZATION_ID}
+      CONTROL_CENTER_ORGANIZATION_NAME: ${UMAI_ORGANIZATION_NAME}
+      CONTROL_CENTER_ORGANIZATION_PLAN: ${UMAI_ORGANIZATION_PLAN:-enterprise}
+      CONTROL_CENTER_ORGANIZATION_LICENSE_EXPIRES_AT: ${UMAI_LICENSE_EXPIRES_AT}
+
+      # Browser extension device token signing.
+      EXTENSION_CONNECT_JWT_SECRET: ${CC_EXTENSION_JWT_SECRET}
+    networks:
+      - umai-public
+
+networks:
+  umai-internal:
+    internal: true
+  umai-public:
