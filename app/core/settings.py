@@ -57,12 +57,12 @@ class Settings(BaseSettings):
     database_connect_timeout_seconds: float | None = None
     redis_url: str | None = None
     require_redis: bool = False
-    default_guardrail_llm_provider: str = "GROQ"
-    default_guardrail_llm_base_url: str = "https://api.groq.com/openai/v1"
+    default_guardrail_llm_provider: str = "OPENROUTER"
+    default_guardrail_llm_base_url: str = "https://openrouter.ai/api/v1"
     default_guardrail_llm_model: str = "openai/gpt-oss-safeguard-20b"
     default_guardrail_llm_timeout_ms: int = 2000
     default_guardrail_llm_auth_type: str = "bearer"
-    default_guardrail_llm_auth_secret_env: str | None = "GROQ_API_KEY"
+    default_guardrail_llm_auth_secret_env: str | None = "OPENROUTER_API_KEY"
     default_guardrail_llm_auth_header_name: str | None = None
     ai_engine_base_url: str | None = None
     cors_allow_origins: list[str] = ["http://localhost:3000"]
@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     async_job_webhook_timeout_seconds: float = 5.0
     admin_jwt_hs256_secret: str | None = None
     enforce_admin_jwt: bool = False
+    admin_auth_mode: str | None = None
     extension_ingest_bearer_token: str | None = None
     extension_ingest_jwt_hs256_secret: str | None = None
     extension_policy_json: str | None = None

@@ -209,6 +209,31 @@ def _normalize_llm_config(raw: object) -> dict:
         raise ServiceError("INVALID_LLM_CONFIG", str(exc), 422) from exc
 
 
+def _normalize_agt_config(raw: object) -> dict | None:
+    if raw is None:
+        return None
+    try:
+        return admin_models.AgtConfig.model_validate(raw).model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    except ValidationError as exc:
+        raise ServiceError("INVALID_AGT_CONFIG", str(exc), 422) from exc
+
+
+def _merge_snapshot_phases(
+    policy_snapshots: list[dict],
+    phases: list[str] | None,
+    agt_config: dict | None,
+) -> list[str]:
+    phase_set = {phase for phase in phases or []}
+    for policy in policy_snapshots:
+        phase_set.update(policy.get("phases", []) or [])
+    if agt_config and agt_config.get("enabled"):
+        phase_set.update(agt_config.get("enforced_phases", []) or [])
+    return _normalize_phases(list(phase_set))
+
+
 def _coerce_bool(value: object) -> bool | None:
     if value is None:
         return None
@@ -258,6 +283,23 @@ def _parse_eval_jsonl(raw_text: str) -> list[dict]:
         expected_allowed = _coerce_bool(payload.get("expected_allowed"))
         expected_severity = _normalize_expected_severity(payload.get("expected_severity"))
         label = payload.get("label") or payload.get("id")
+        artifacts = payload.get("artifacts")
+        if artifacts is not None:
+            try:
+                artifacts = [
+                    item.model_dump(mode="json")
+                    for item in InputPayload.model_validate(
+                        {
+                            "messages": [{"role": "user", "content": str(prompt)}],
+                            "phase_focus": payload.get("phase_focus") or "LAST_USER_MESSAGE",
+                            "content_type": payload.get("content_type") or "text",
+                            "language": payload.get("language"),
+                            "artifacts": artifacts,
+                        }
+                    ).artifacts
+                ]
+            except ValidationError as exc:
+                raise ServiceError("EVAL_BAD_ARTIFACTS", str(exc), 400) from exc
         cases.append(
             {
                 "prompt": str(prompt),
@@ -265,9 +307,71 @@ def _parse_eval_jsonl(raw_text: str) -> list[dict]:
                 "expected_action": expected_action,
                 "expected_allowed": expected_allowed,
                 "expected_severity": expected_severity,
+                "phase_focus": payload.get("phase_focus"),
+                "content_type": payload.get("content_type"),
+                "language": payload.get("language"),
+                "artifacts": artifacts,
             }
         )
     return cases
+
+
+def _build_default_eval_artifact(phase: str, prompt: str, case: dict) -> dict | None:
+    expected_action = str(case.get("expected_action") or "").upper()
+    inferred_action = str(case.get("action") or "").strip().lower()
+    if not inferred_action:
+        inferred_action = "write" if expected_action == "STEP_UP_APPROVAL" else "read"
+
+    metadata: dict[str, object] = {
+        "agent_id": case.get("agent_id") or "eval-agent",
+        "action": inferred_action,
+        "capability": case.get("capability") or phase.lower(),
+        "params": case.get("params") or {"summary": prompt},
+        "classification": case.get("classification"),
+        "resource_id": case.get("resource_id"),
+        "side_effect": case.get("side_effect"),
+    }
+    if phase == "TOOL_INPUT":
+        metadata["tool_name"] = case.get("tool_name") or "project.lookup"
+    elif phase == "MCP_REQUEST":
+        metadata["server_name"] = case.get("server_name") or "project-mcp"
+        metadata["method"] = case.get("method") or ("delete" if inferred_action == "delete" else "read")
+    elif phase == "MEMORY_WRITE":
+        metadata["memory_scope"] = case.get("memory_scope") or "conversation"
+    else:
+        return None
+
+    return {
+        "artifact_type": phase,
+        "name": case.get("artifact_name") or phase.lower(),
+        "payload_summary": case.get("payload_summary") or prompt,
+        "metadata": metadata,
+    }
+
+
+def _build_evaluation_input_payload(phase: str, prompt: str, case: dict) -> InputPayload:
+    default_phase_focus = (
+        "LAST_USER_MESSAGE"
+        if phase in {"PRE_LLM", "TOOL_INPUT", "MCP_REQUEST", "MEMORY_WRITE"}
+        else "LAST_ASSISTANT_MESSAGE"
+    )
+    artifacts = case.get("artifacts")
+    if not artifacts and phase in {"TOOL_INPUT", "MCP_REQUEST", "MEMORY_WRITE"}:
+        default_artifact = _build_default_eval_artifact(phase, prompt, case)
+        artifacts = [default_artifact] if default_artifact else []
+
+    role = (
+        "user"
+        if phase in {"PRE_LLM", "TOOL_INPUT", "MCP_REQUEST", "MEMORY_WRITE"}
+        else "assistant"
+    )
+    return InputPayload(
+        messages=[ChatMessage(role=role, content=prompt)],
+        phase_focus=case.get("phase_focus") or default_phase_focus,
+        content_type=case.get("content_type") or "text",
+        language=case.get("language"),
+        artifacts=artifacts or [],
+    )
 
 
 def _evaluation_run_to_response(run: EvaluationRun) -> admin_models.EvaluationRunResponse:
@@ -1496,24 +1600,11 @@ async def _run_evaluation_background(
                     )
                     guardrail_version = guardrail_version or guardrail.current_version
 
-        phase_focus = "LAST_USER_MESSAGE" if phase in {"PRE_LLM", "TOOL_INPUT", "MCP_REQUEST", "MEMORY_WRITE"} else "LAST_ASSISTANT_MESSAGE"
         for index, case in enumerate(cases, start=1):
             prompt = str(case.get("prompt", ""))
             request_id = str(uuid.uuid4())
             timestamp = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-            input_payload = InputPayload(
-                messages=[
-                    ChatMessage(
-                        role="user"
-                        if phase in {"PRE_LLM", "TOOL_INPUT", "MCP_REQUEST", "MEMORY_WRITE"}
-                        else "assistant",
-                        content=prompt,
-                    )
-                ],
-                phase_focus=phase_focus,
-                content_type="text",
-                language=None,
-            )
+            input_payload = _build_evaluation_input_payload(phase, prompt, case)
             engine_request = EngineRequest(
                 request_id=request_id,
                 timestamp=timestamp,
@@ -1659,6 +1750,7 @@ async def deploy_guardrail_library(
     version = template["version"]
     policy_ids: list[str] = []
     policy_snapshots: list[dict] = []
+    normalized_agt = _normalize_agt_config(template.get("agt"))
     redis_key: str | None = None
     published = False
     async with session.begin():
@@ -1713,12 +1805,11 @@ async def deploy_guardrail_library(
                 if policy.policy_id not in existing_ids:
                     policy_snapshots.append(_policy_to_snapshot(policy))
                     existing_ids.add(policy.policy_id)
-            phase_set = {
-                phase
-                for policy in policy_snapshots
-                for phase in policy.get("phases", [])
-            }
-            phases = _normalize_phases(list(phase_set))
+            phases = _merge_snapshot_phases(
+                policy_snapshots,
+                template.get("phases"),
+                normalized_agt,
+            )
             guardrail = Guardrail(
                 tenant_id=payload.tenant_id,
                 environment_id=payload.environment_id,
@@ -1738,6 +1829,8 @@ async def deploy_guardrail_library(
                 "policies": policy_snapshots,
                 "llm_config": _normalize_llm_config(template["llm_config"]),
             }
+            if normalized_agt is not None:
+                snapshot_payload["agt"] = normalized_agt
             signature, key_id = sign_snapshot(snapshot_payload)
             snapshot_json = json.dumps(
                 snapshot_payload, separators=(",", ":"), ensure_ascii=True
@@ -1964,193 +2057,209 @@ async def create_guardrail_version(
     _require_tenant_access(principal, payload.tenant_id)
     if payload.snapshot_json is not None and payload.policy_ids is not None:
         raise ServiceError("INVALID_REQUEST", "Provide snapshot_json or policy_ids, not both", 422)
+    if payload.snapshot_json is not None and payload.agt is not None:
+        raise ServiceError(
+            "INVALID_REQUEST",
+            "Provide AGT config inside snapshot_json or payload.agt, not both",
+            422,
+        )
     auto_published = False
     redis_key: str | None = None
-    async with session.begin():
-        async with tenant_scope(session, str(payload.tenant_id)):
-            guardrail = await session.get(
-                Guardrail,
-                (payload.tenant_id, payload.environment_id, payload.project_id, guardrail_id),
-            )
-            if guardrail is None:
-                raise ServiceError("GUARDRAIL_NOT_FOUND", "Guardrail not found", 404)
-            existing_version = await session.execute(
-                select(GuardrailVersion.version)
-                .where(
-                    GuardrailVersion.tenant_id == payload.tenant_id,
-                    GuardrailVersion.environment_id == payload.environment_id,
-                    GuardrailVersion.project_id == payload.project_id,
-                    GuardrailVersion.guardrail_id == guardrail_id,
+    try:
+        async with session.begin():
+            async with tenant_scope(session, str(payload.tenant_id)):
+                guardrail = await session.get(
+                    Guardrail,
+                    (payload.tenant_id, payload.environment_id, payload.project_id, guardrail_id),
                 )
-                .limit(1)
-            )
-            has_existing_versions = existing_version.scalar_one_or_none() is not None
-            required_policies = await _fetch_required_policies(
-                session, payload.tenant_id, payload.environment_id
-            )
-            required_policy_ids = {policy.policy_id for policy in required_policies}
-            snapshot_payload = payload.snapshot_json
-            if snapshot_payload is None:
-                if not payload.policy_ids:
-                    raise ServiceError(
-                        "INVALID_REQUEST",
-                        "policy_ids required when snapshot_json is omitted",
-                        422,
+                if guardrail is None:
+                    raise ServiceError("GUARDRAIL_NOT_FOUND", "Guardrail not found", 404)
+                existing_version = await session.execute(
+                    select(GuardrailVersion.version)
+                    .where(
+                        GuardrailVersion.tenant_id == payload.tenant_id,
+                        GuardrailVersion.environment_id == payload.environment_id,
+                        GuardrailVersion.project_id == payload.project_id,
+                        GuardrailVersion.guardrail_id == guardrail_id,
                     )
-                if payload.llm_config is None:
-                    raise ServiceError(
-                        "LLM_CONFIG_REQUIRED",
-                        "llm_config is required when snapshot_json is omitted",
-                        422,
-                    )
-                if required_policy_ids:
-                    conflict_result = await session.execute(
-                        select(Policy.policy_id).where(
+                    .limit(1)
+                )
+                has_existing_versions = existing_version.scalar_one_or_none() is not None
+                required_policies = await _fetch_required_policies(
+                    session, payload.tenant_id, payload.environment_id
+                )
+                required_policy_ids = {policy.policy_id for policy in required_policies}
+                snapshot_payload = payload.snapshot_json
+                normalized_agt = _normalize_agt_config(payload.agt)
+                if snapshot_payload is None:
+                    if not payload.policy_ids:
+                        raise ServiceError(
+                            "INVALID_REQUEST",
+                            "policy_ids required when snapshot_json is omitted",
+                            422,
+                        )
+                    if payload.llm_config is None:
+                        raise ServiceError(
+                            "LLM_CONFIG_REQUIRED",
+                            "llm_config is required when snapshot_json is omitted",
+                            422,
+                        )
+                    if required_policy_ids:
+                        conflict_result = await session.execute(
+                            select(Policy.policy_id).where(
+                                Policy.tenant_id == payload.tenant_id,
+                                Policy.environment_id == payload.environment_id,
+                                Policy.project_id == payload.project_id,
+                                Policy.scope == "PROJECT",
+                                Policy.policy_id.in_(required_policy_ids),
+                            )
+                        )
+                        conflicts = list(conflict_result.scalars().all())
+                        if conflicts:
+                            raise ServiceError(
+                                "POLICY_SCOPE_CONFLICT",
+                                "Policy IDs conflict with required organization/environment policies: "
+                                + ", ".join(sorted(set(conflicts))),
+                                409,
+                            )
+                    result = await session.execute(
+                        select(Policy).where(
                             Policy.tenant_id == payload.tenant_id,
                             Policy.environment_id == payload.environment_id,
                             Policy.project_id == payload.project_id,
                             Policy.scope == "PROJECT",
-                            Policy.policy_id.in_(required_policy_ids),
+                            Policy.policy_id.in_(payload.policy_ids),
                         )
                     )
-                    conflicts = list(conflict_result.scalars().all())
-                    if conflicts:
+                    policies = result.scalars().all()
+                    policy_map = {policy.policy_id: policy for policy in policies}
+                    missing = [
+                        policy_id
+                        for policy_id in payload.policy_ids
+                        if policy_id not in policy_map and policy_id not in required_policy_ids
+                    ]
+                    if missing:
                         raise ServiceError(
-                            "POLICY_SCOPE_CONFLICT",
-                            "Policy IDs conflict with required organization/environment policies: "
-                            + ", ".join(sorted(set(conflicts))),
-                            409,
+                            "POLICY_NOT_FOUND",
+                            f"Policies not found: {', '.join(missing)}",
+                            404,
                         )
-                result = await session.execute(
-                    select(Policy).where(
-                        Policy.tenant_id == payload.tenant_id,
-                        Policy.environment_id == payload.environment_id,
-                        Policy.project_id == payload.project_id,
-                        Policy.scope == "PROJECT",
-                        Policy.policy_id.in_(payload.policy_ids),
+                    policy_snapshots: list[dict] = []
+                    seen_ids: set[str] = set()
+                    for policy_id in payload.policy_ids:
+                        policy = policy_map.get(policy_id)
+                        if policy and policy_id not in seen_ids:
+                            policy_snapshots.append(_policy_to_snapshot(policy))
+                            seen_ids.add(policy_id)
+                    for policy in required_policies:
+                        if policy.policy_id not in seen_ids:
+                            policy_snapshots.append(_policy_to_snapshot(policy))
+                            seen_ids.add(policy.policy_id)
+                    phases = _merge_snapshot_phases(
+                        policy_snapshots,
+                        payload.phases,
+                        normalized_agt,
                     )
-                )
-                policies = result.scalars().all()
-                policy_map = {policy.policy_id: policy for policy in policies}
-                missing = [
-                    policy_id
-                    for policy_id in payload.policy_ids
-                    if policy_id not in policy_map and policy_id not in required_policy_ids
-                ]
-                if missing:
-                    raise ServiceError(
-                        "POLICY_NOT_FOUND",
-                        f"Policies not found: {', '.join(missing)}",
-                        404,
-                    )
-                policy_snapshots: list[dict] = []
-                seen_ids: set[str] = set()
-                for policy_id in payload.policy_ids:
-                    policy = policy_map.get(policy_id)
-                    if policy and policy_id not in seen_ids:
-                        policy_snapshots.append(_policy_to_snapshot(policy))
-                        seen_ids.add(policy_id)
-                for policy in required_policies:
-                    if policy.policy_id not in seen_ids:
-                        policy_snapshots.append(_policy_to_snapshot(policy))
-                        seen_ids.add(policy.policy_id)
-                if payload.phases is not None:
-                    phase_set = {phase for phase in payload.phases}
-                    for policy in policy_snapshots:
-                        for phase in policy.get("phases", []):
-                            phase_set.add(phase)
-                    phases = _normalize_phases(list(phase_set))
-                else:
-                    phase_set = {
-                        phase
-                        for policy in policy_snapshots
-                        for phase in policy.get("phases", [])
+                    if not phases:
+                        raise ServiceError(
+                            "INVALID_REQUEST",
+                            "phases required or derived from policies",
+                            422,
+                        )
+                    snapshot_payload = {
+                        "guardrail_id": guardrail_id,
+                        "version": payload.version,
+                        "mode": guardrail.mode,
+                        "phases": phases,
+                        "preflight": payload.preflight or DEFAULT_PREFLIGHT,
+                        "policies": policy_snapshots,
+                        "llm_config": _normalize_llm_config(payload.llm_config),
                     }
-                    phases = _normalize_phases(list(phase_set))
-                if not phases:
-                    raise ServiceError(
-                        "INVALID_REQUEST",
-                        "phases required or derived from policies",
-                        422,
+                    if normalized_agt is not None:
+                        snapshot_payload["agt"] = normalized_agt
+                else:
+                    if not isinstance(snapshot_payload, dict):
+                        raise ServiceError(
+                            "INVALID_REQUEST",
+                            "snapshot_json must be an object",
+                            422,
+                        )
+                    policies_list = snapshot_payload.get("policies")
+                    if not isinstance(policies_list, list):
+                        raise ServiceError(
+                            "INVALID_REQUEST",
+                            "snapshot_json.policies must be a list",
+                            422,
+                        )
+                    existing_ids = {
+                        policy.get("id")
+                        for policy in policies_list
+                        if isinstance(policy, dict) and policy.get("id")
+                    }
+                    for policy in required_policies:
+                        if policy.policy_id not in existing_ids:
+                            policies_list.append(_policy_to_snapshot(policy))
+                            existing_ids.add(policy.policy_id)
+                    normalized_agt = _normalize_agt_config(snapshot_payload.get("agt"))
+                    snapshot_payload["phases"] = _merge_snapshot_phases(
+                        policies_list,
+                        snapshot_payload.get("phases", []) or [],
+                        normalized_agt,
                     )
-                snapshot_payload = {
-                    "guardrail_id": guardrail_id,
-                    "version": payload.version,
-                    "mode": guardrail.mode,
-                    "phases": phases,
-                    "preflight": payload.preflight or DEFAULT_PREFLIGHT,
-                    "policies": policy_snapshots,
-                    "llm_config": _normalize_llm_config(payload.llm_config),
-                }
-            else:
-                if not isinstance(snapshot_payload, dict):
-                    raise ServiceError(
-                        "INVALID_REQUEST",
-                        "snapshot_json must be an object",
-                        422,
+                    snapshot_payload["policies"] = policies_list
+                    snapshot_payload["llm_config"] = _normalize_llm_config(
+                        snapshot_payload.get("llm_config")
                     )
-                policies_list = snapshot_payload.get("policies")
-                if not isinstance(policies_list, list):
-                    raise ServiceError(
-                        "INVALID_REQUEST",
-                        "snapshot_json.policies must be a list",
-                        422,
+                    if normalized_agt is not None:
+                        snapshot_payload["agt"] = normalized_agt
+                    else:
+                        snapshot_payload.pop("agt", None)
+                signature, key_id = sign_snapshot(snapshot_payload)
+                snapshot_json = json.dumps(
+                    snapshot_payload, separators=(",", ":"), ensure_ascii=True
+                )
+                version_row = GuardrailVersion(
+                    tenant_id=payload.tenant_id,
+                    environment_id=payload.environment_id,
+                    project_id=payload.project_id,
+                    guardrail_id=guardrail_id,
+                    version=payload.version,
+                    snapshot_json=snapshot_json,
+                    signature=signature,
+                    key_id=key_id,
+                    created_by=payload.created_by,
+                )
+                session.add(version_row)
+                if not has_existing_versions:
+                    try:
+                        redis = get_redis()
+                    except RuntimeError as exc:
+                        raise ServiceError("REDIS_UNAVAILABLE", str(exc), 503) from exc
+                    version_row.approved_by = payload.created_by or "system"
+                    version_row.approved_at = dt.datetime.now(dt.timezone.utc)
+                    redis_key = build_snapshot_key(
+                        str(payload.tenant_id),
+                        payload.environment_id,
+                        payload.project_id,
+                        guardrail_id,
+                        payload.version,
                     )
-                existing_ids = {
-                    policy.get("id")
-                    for policy in policies_list
-                    if isinstance(policy, dict) and policy.get("id")
-                }
-                for policy in required_policies:
-                    if policy.policy_id not in existing_ids:
-                        policies_list.append(_policy_to_snapshot(policy))
-                        existing_ids.add(policy.policy_id)
-                phase_set = {phase for phase in snapshot_payload.get("phases", []) or []}
-                for policy in policies_list:
-                    for phase in (policy.get("phases") or []):
-                        phase_set.add(phase)
-                snapshot_payload["phases"] = _normalize_phases(list(phase_set))
-                snapshot_payload["policies"] = policies_list
-                snapshot_payload["llm_config"] = _normalize_llm_config(
-                    snapshot_payload.get("llm_config")
-                )
-            signature, key_id = sign_snapshot(snapshot_payload)
-            snapshot_json = json.dumps(
-                snapshot_payload, separators=(",", ":"), ensure_ascii=True
-            )
-            version_row = GuardrailVersion(
-                tenant_id=payload.tenant_id,
-                environment_id=payload.environment_id,
-                project_id=payload.project_id,
-                guardrail_id=guardrail_id,
-                version=payload.version,
-                snapshot_json=snapshot_json,
-                signature=signature,
-                key_id=key_id,
-                created_by=payload.created_by,
-            )
-            session.add(version_row)
-            if not has_existing_versions:
-                try:
-                    redis = get_redis()
-                except RuntimeError as exc:
-                    raise ServiceError("REDIS_UNAVAILABLE", str(exc), 503) from exc
-                version_row.approved_by = payload.created_by or "system"
-                version_row.approved_at = dt.datetime.now(dt.timezone.utc)
-                redis_key = build_snapshot_key(
-                    str(payload.tenant_id),
-                    payload.environment_id,
-                    payload.project_id,
-                    guardrail_id,
-                    payload.version,
-                )
-                await publish_snapshot(
-                    redis,
-                    redis_key,
-                    pack_snapshot_record(snapshot_payload, signature, key_id),
-                )
-                guardrail.current_version = payload.version
-                auto_published = True
+                    await publish_snapshot(
+                        redis,
+                        redis_key,
+                        pack_snapshot_record(snapshot_payload, signature, key_id),
+                    )
+                    guardrail.current_version = payload.version
+                    auto_published = True
+    except IntegrityError as exc:
+        error_text = str(exc).upper()
+        if "GUARDRAIL_VERSIONS" in error_text and "VERSION" in error_text:
+            raise ServiceError(
+                "VERSION_EXISTS",
+                f"Guardrail version {payload.version} already exists for {guardrail_id}",
+                409,
+            ) from exc
+        raise
     logger.info(
         "admin.guardrail_version.created tenant_id=%s env=%s project=%s guardrail_id=%s version=%s",
         payload.tenant_id,

@@ -115,6 +115,84 @@ class GuardrailLlmConfig(BaseModel):
     auth: LlmAuthConfig | None = None
 
 
+class AgtPolicyCondition(BaseModel):
+    field: str
+    operator: Literal[
+        "EQUALS",
+        "NOT_EQUALS",
+        "IN",
+        "NOT_IN",
+        "CONTAINS",
+        "MATCHES_REGEX",
+        "EXISTS",
+        "NOT_EXISTS",
+        "STARTS_WITH",
+        "ENDS_WITH",
+        "GT",
+        "GTE",
+        "LT",
+        "LTE",
+    ] = "EQUALS"
+    value: object | None = None
+
+    @model_validator(mode="after")
+    def validate_condition(self) -> "AgtPolicyCondition":
+        if self.operator in {"EXISTS", "NOT_EXISTS"}:
+            return self
+        if self.value is None:
+            raise ValueError(f"value is required for operator {self.operator}")
+        return self
+
+
+class AgtPolicyRule(BaseModel):
+    id: str
+    description: str | None = None
+    effect: Literal[
+        "ALLOW",
+        "BLOCK",
+        "STEP_UP_APPROVAL",
+        "ALLOW_WITH_WARNINGS",
+    ]
+    severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = "MEDIUM"
+    conditions: list[AgtPolicyCondition] = Field(default_factory=list)
+
+
+class AgtPolicyDocument(BaseModel):
+    version: str = "1"
+    default_action: Literal[
+        "ALLOW",
+        "BLOCK",
+        "STEP_UP_APPROVAL",
+        "ALLOW_WITH_WARNINGS",
+    ] = "ALLOW"
+    rules: list[AgtPolicyRule] = Field(default_factory=list)
+
+
+class AgtConfig(BaseModel):
+    enabled: bool = False
+    mode: Literal["ENFORCE", "ADVISORY"] = "ENFORCE"
+    enforced_phases: list[PolicyPhase] = Field(default_factory=list)
+    policy_document: AgtPolicyDocument | None = None
+    bundle_ref: str | None = None
+    fail_closed: bool = True
+
+    @model_validator(mode="after")
+    def validate_agt(self) -> "AgtConfig":
+        if not self.enabled:
+            return self
+        if not self.policy_document:
+            raise ValueError("policy_document is required when AGT is enabled")
+        if not self.enforced_phases:
+            raise ValueError("enforced_phases is required when AGT is enabled")
+        unsupported = set(self.enforced_phases) - {"TOOL_INPUT", "MCP_REQUEST", "MEMORY_WRITE"}
+        if unsupported:
+            unsupported_list = ", ".join(sorted(unsupported))
+            raise ValueError(
+                f"AGT v1 only supports TOOL_INPUT, MCP_REQUEST, and MEMORY_WRITE; got {unsupported_list}"
+            )
+        return self
+
+
 class PolicyCreateRequest(BaseModel):
     tenant_id: uuid.UUID
     environment_id: str
@@ -180,6 +258,7 @@ class GuardrailVersionCreateRequest(BaseModel):
     preflight: dict | None = None
     llm_config: GuardrailLlmConfig | None = None
     phases: list[PolicyPhase] | None = None
+    agt: AgtConfig | None = None
 
 
 class GuardrailVersionResponse(BaseModel):
@@ -248,6 +327,7 @@ class GuardrailLibraryItem(BaseModel):
     phases: list[PolicyPhase]
     preflight: dict
     llm_config: GuardrailLlmConfig
+    agt: AgtConfig | None = None
     policies: list[GuardrailLibraryPolicy]
     managed: bool = True
     tags: list[str] | None = None
@@ -308,6 +388,7 @@ class AgenticGuardrailSuggestion(BaseModel):
     phases: list[PolicyPhase]
     preflight: dict
     llm_config: GuardrailLlmConfig
+    agt: AgtConfig | None = None
 
 
 class AgenticGuardrailResponse(BaseModel):
@@ -323,7 +404,7 @@ class GuardrailTestRequest(BaseModel):
     project_id: str
     guardrail_id: str
     guardrail_version: int | None = None
-    phase: Literal["PRE_LLM", "POST_LLM"]
+    phase: PolicyPhase
     input: InputPayload
     timeout_ms: int | None = 1500
     allow_llm_calls: bool = True
@@ -356,7 +437,7 @@ class GuardrailTestResponse(BaseModel):
     request_id: str
     guardrail_id: str
     guardrail_version: int
-    phase: Literal["PRE_LLM", "POST_LLM"]
+    phase: PolicyPhase
     decision: GuardrailTestDecision
     triggering_policy: GuardrailTestTriggeringPolicy | None = None
     latency_ms: GuardrailTestLatency

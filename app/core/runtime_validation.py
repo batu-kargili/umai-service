@@ -26,6 +26,18 @@ _SUPPORTED_DRIVERS = {
 }
 
 
+def _runtime_environment() -> str:
+    for key in ("DUVARAI_ENVIRONMENT", "APP_ENV", "ENVIRONMENT", "NODE_ENV"):
+        raw = os.getenv(key)
+        if raw and raw.strip():
+            return raw.strip().lower()
+    return "development"
+
+
+def _is_production() -> bool:
+    return _runtime_environment() in {"prod", "production"}
+
+
 def _normalize_database_engine(value: str) -> str:
     normalized = _ENGINE_ALIASES.get(value.strip().lower())
     if not normalized:
@@ -87,6 +99,7 @@ def validate_service_runtime() -> None:
     the ``/readyz`` endpoint instead.
     """
     warnings: list[str] = []
+    production = _is_production()
 
     if not settings.database_url:
         warnings.append(
@@ -109,9 +122,39 @@ def validate_service_runtime() -> None:
             "guardrail evaluation will be unavailable"
         )
 
-    if settings.enforce_admin_jwt and not settings.admin_jwt_hs256_secret:
+    admin_auth_mode = (settings.admin_auth_mode or "").strip().lower()
+    if admin_auth_mode and admin_auth_mode not in {"development", "network-trust", "jwt"}:
+        raise RuntimeError(
+            "DUVARAI_ADMIN_AUTH_MODE must be one of development, network-trust, or jwt"
+        )
+
+    if production and not settings.redis_url:
+        raise RuntimeError(
+            "Production runtime requires DUVARAI_REDIS_URL for published guardrail snapshots"
+        )
+
+    snapshot_signing_key = settings.snapshot_signing_key or settings.ledger_signing_key
+    if production and not snapshot_signing_key:
+        raise RuntimeError(
+            "Production runtime requires DUVARAI_SNAPSHOT_SIGNING_KEY "
+            "(or DUVARAI_LEDGER_SIGNING_KEY) so snapshots are signed"
+        )
+
+    if production and not admin_auth_mode:
+        raise RuntimeError(
+            "Production runtime requires DUVARAI_ADMIN_AUTH_MODE to be explicitly set "
+            "to development, network-trust, or jwt"
+        )
+
+    jwt_required = settings.enforce_admin_jwt or admin_auth_mode == "jwt"
+    if production and admin_auth_mode == "jwt" and not settings.admin_jwt_hs256_secret:
+        raise RuntimeError(
+            "Production runtime requires DUVARAI_ADMIN_JWT_HS256_SECRET when "
+            "DUVARAI_ADMIN_AUTH_MODE=jwt"
+        )
+    if jwt_required and not settings.admin_jwt_hs256_secret:
         warnings.append(
-            "enforce_admin_jwt=true but DUVARAI_ADMIN_JWT_HS256_SECRET is not set - "
+            "Admin JWT mode is enabled but DUVARAI_ADMIN_JWT_HS256_SECRET is not set - "
             "all admin requests will fail with AUTH_MISCONFIGURED"
         )
 
@@ -120,8 +163,6 @@ def validate_service_runtime() -> None:
             "require_redis=true but DUVARAI_REDIS_URL is not set - "
             "snapshot publishing will fail"
         )
-
-    snapshot_signing_key = settings.snapshot_signing_key or settings.ledger_signing_key
     if settings.redis_url and not snapshot_signing_key:
         warnings.append(
             "DUVARAI_SNAPSHOT_SIGNING_KEY is not set - "

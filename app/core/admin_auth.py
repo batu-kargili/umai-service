@@ -24,6 +24,15 @@ _ALL_ROLES = [
 ]
 
 
+def _use_jwt_admin_auth() -> bool:
+    mode = (settings.admin_auth_mode or "").strip().lower()
+    if mode == "jwt":
+        return True
+    if mode in {"development", "network-trust"}:
+        return False
+    return settings.enforce_admin_jwt
+
+
 @dataclass
 class AdminPrincipal:
     """Represents an authenticated admin caller."""
@@ -115,7 +124,7 @@ async def get_admin_principal(request: Request) -> AdminPrincipal:
     ``DUVARAI_ENFORCE_ADMIN_JWT=true`` and supply
     ``DUVARAI_ADMIN_JWT_HS256_SECRET`` to require explicit JWT auth.
     """
-    if not settings.enforce_admin_jwt:
+    if not _use_jwt_admin_auth():
         return AdminPrincipal(
             tenant_id=None,
             roles=list(_ALL_ROLES),
