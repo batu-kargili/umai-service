@@ -38,4 +38,8 @@ if [ -n "${UMAI_DATABASE_URL:-}" ] && is_truthy "${UMAI_RUN_DB_MIGRATIONS:-true}
   run_migrations
 fi
 
+if [ -n "${UMAI_DATABASE_URL:-}" ] && is_truthy "${UMAI_RUN_SEED:-false}"; then
+  python seed.py
+fi
+
 exec uvicorn app.main:app --host 0.0.0.0 --port 8080

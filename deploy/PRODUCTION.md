@@ -81,6 +81,8 @@ open http://localhost:3000
 
 On first startup, `umai-service` runs `alembic upgrade head` automatically before it begins serving traffic.
 
+To bootstrap a PoC with a tenant, environment, project, and a published built-in guardrail, set `UMAI_RUN_SEED=true` and the `UMAI_SEED_*` variables before startup. The seed job is idempotent and can run on every restart.
+
 ## Configuration Reference
 
 ### License
@@ -105,6 +107,29 @@ On first startup, `umai-service` runs `alembic upgrade head` automatically befor
 | `UMAI_REDIS_URL` | No | Redis URL for published guardrail snapshots. Default: bundled `redis://redis:6379/0` |
 | `UMAI_SNAPSHOT_SIGNING_KEY` | Yes | Shared HMAC key for signing published guardrail snapshots |
 | `UMAI_SNAPSHOT_SIGNING_KEY_ID` | No | Identifier stored with signed snapshots. Default: `default` |
+| `UMAI_ENVIRONMENT` | Yes | Set to `production` for production runtime checks |
+| `UMAI_ADMIN_AUTH_MODE` | Yes | Use `network-trust` only when service is internal-only; use `jwt` when directly exposed |
+| `UMAI_DEFAULT_GUARDRAIL_LLM_BASE_URL` | Yes | OpenAI-compatible endpoint used by context-aware policies |
+| `UMAI_DEFAULT_GUARDRAIL_LLM_MODEL` | Yes | Model used by context-aware policies |
+| `UMAI_DEFAULT_GUARDRAIL_LLM_AUTH_SECRET_ENV` | Yes | Name of the engine env var containing the inference API key |
+
+### Optional PoC Guardrail Bootstrap
+
+Set these values to create and publish the Turkish regulated telecom guardrail during startup:
+
+```bash
+UMAI_RUN_SEED=true
+UMAI_SEED_TENANT_ID=<same UUID as UMAI_ORGANIZATION_ID>
+UMAI_SEED_TENANT_NAME=<customer display name>
+UMAI_SEED_ENVIRONMENT_ID=prod
+UMAI_SEED_ENVIRONMENT_NAME=Production
+UMAI_SEED_PROJECT_ID=poc
+UMAI_SEED_PROJECT_NAME=PoC
+UMAI_SEED_GUARDRAIL_TEMPLATE_ID=gr-tr-regulated-telecom-sovereign-shield
+UMAI_SEED_GUARDRAIL_ID=gr-tr-regulated-telecom-sovereign-shield
+UMAI_SEED_GUARDRAIL_NAME=Turkiye Regulated Telecom Sovereign Shield
+UMAI_SEED_PUBLISH_GUARDRAIL=true
+```
 
 ### Control Center - Session
 
