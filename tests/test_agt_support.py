@@ -83,7 +83,7 @@ class AgtSupportTests(unittest.TestCase):
                 enforce_admin_jwt=False,
                 admin_jwt_hs256_secret=None,
             ):
-                with self.assertRaisesRegex(RuntimeError, "DUVARAI_ADMIN_AUTH_MODE"):
+                with self.assertRaisesRegex(RuntimeError, "UMAI_ADMIN_AUTH_MODE"):
                     validate_service_runtime()
 
 

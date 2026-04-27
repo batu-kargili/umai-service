@@ -12,7 +12,7 @@ from app.models.db import License, Tenant
 
 
 FALLBACK_TENANT_ID = uuid.UUID("9f6ec99e-a12e-4ba0-9b68-3fae4825df19")
-FALLBACK_TENANT_NAME = "DuvarAI Enterprise"
+FALLBACK_TENANT_NAME = "UMAI Enterprise"
 DEFAULT_LICENSE_DAYS = 3650
 
 
@@ -36,11 +36,11 @@ def _read_uuid_env(name: str, default: uuid.UUID) -> uuid.UUID:
 
 
 async def seed():
-    tenant_id = _read_uuid_env("DUVARAI_SEED_TENANT_ID", FALLBACK_TENANT_ID)
-    tenant_name = _read_env("DUVARAI_SEED_TENANT_NAME", FALLBACK_TENANT_NAME)
-    license_days = int(_read_env("DUVARAI_SEED_LICENSE_DAYS", str(DEFAULT_LICENSE_DAYS)))
-    plan_tier = _read_env("DUVARAI_SEED_LICENSE_PLAN", "enterprise")
-    allow_llm_calls = _read_bool_env("DUVARAI_SEED_ALLOW_LLM_CALLS", True)
+    tenant_id = _read_uuid_env("UMAI_SEED_TENANT_ID", FALLBACK_TENANT_ID)
+    tenant_name = _read_env("UMAI_SEED_TENANT_NAME", FALLBACK_TENANT_NAME)
+    license_days = int(_read_env("UMAI_SEED_LICENSE_DAYS", str(DEFAULT_LICENSE_DAYS)))
+    plan_tier = _read_env("UMAI_SEED_LICENSE_PLAN", "enterprise")
+    allow_llm_calls = _read_bool_env("UMAI_SEED_ALLOW_LLM_CALLS", True)
 
     engine = create_async_engine(settings.database_url)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

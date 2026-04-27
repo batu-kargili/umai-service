@@ -23,6 +23,7 @@ class EngineRequest(BaseModel):
     input: InputPayload
     timeout_ms: int | None = 1500
     flags: EngineFlags = Field(default_factory=EngineFlags)
+    agent_context: dict | None = None
 
 
 class EngineDecision(BaseModel):

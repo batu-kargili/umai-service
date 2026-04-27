@@ -1,1 +1,1 @@
-"""DuvarAI Service package."""
+"""UMAI Service package."""

@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from app.core.db import get_engine
 
-logger = logging.getLogger("duvarai.service.repair_oracle_schema")
+logger = logging.getLogger("umai.service.repair_oracle_schema")
 
 REQUIRED_COLUMNS = {
     "GUARDRAIL_VERSIONS": {

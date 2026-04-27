@@ -22,7 +22,7 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         if not settings.database_url:
-            raise RuntimeError("DUVARAI_DATABASE_URL is not set")
+            raise RuntimeError("UMAI_DATABASE_URL is not set")
         drivername = make_url(settings.database_url).drivername.lower()
         engine_kwargs: dict[str, object] = {
             "pool_pre_ping": True,

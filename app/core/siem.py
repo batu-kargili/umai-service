@@ -7,11 +7,11 @@ import httpx
 
 from app.core.settings import settings
 
-logger = logging.getLogger("duvarai.service.siem")
+logger = logging.getLogger("umai.service.siem")
 
 
 def _load_endpoints() -> list[dict]:
-    """Load SIEM endpoint configs from ``DUVARAI_SIEM_ENDPOINTS_JSON``."""
+    """Load SIEM endpoint configs from ``UMAI_SIEM_ENDPOINTS_JSON``."""
     if not settings.siem_endpoints_json:
         return []
     try:

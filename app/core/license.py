@@ -70,14 +70,14 @@ def license_allows_llm_calls(license_row: License, default: bool = True) -> bool
     return default
 
 
-LICENSE_ENV_VAR = "DUVARAI_LICENSE_TOKEN"
-LICENSE_FILE_ENV_VAR = "DUVARAI_LICENSE_FILE"
-LICENSE_PUBLIC_KEY_ENV_VAR = "DUVARAI_LICENSE_PUBLIC_KEY"
-LICENSE_PUBLIC_KEYS_ENV_VAR = "DUVARAI_LICENSE_PUBLIC_KEYS"
-LICENSE_STRICT_ENV_VAR = "DUVARAI_LICENSE_STRICT"
-LICENSE_DEFAULT_PATH = "/etc/duvarai/license.json"
+LICENSE_ENV_VAR = "UMAI_LICENSE_TOKEN"
+LICENSE_FILE_ENV_VAR = "UMAI_LICENSE_FILE"
+LICENSE_PUBLIC_KEY_ENV_VAR = "UMAI_LICENSE_PUBLIC_KEY"
+LICENSE_PUBLIC_KEYS_ENV_VAR = "UMAI_LICENSE_PUBLIC_KEYS"
+LICENSE_STRICT_ENV_VAR = "UMAI_LICENSE_STRICT"
+LICENSE_DEFAULT_PATH = "/etc/umai/license.json"
 
-logger = logging.getLogger("duvarai.service.license")
+logger = logging.getLogger("umai.service.license")
 
 
 def load_license_token() -> str | None:
@@ -230,7 +230,7 @@ def _load_public_keys() -> dict[str, Ed25519PublicKey]:
         except json.JSONDecodeError as exc:
             raise ServiceError(
                 "LICENSE_PUBLIC_KEY_INVALID",
-                "DUVARAI_LICENSE_PUBLIC_KEYS must be JSON",
+                "UMAI_LICENSE_PUBLIC_KEYS must be JSON",
                 500,
             ) from exc
         if isinstance(parsed, dict):

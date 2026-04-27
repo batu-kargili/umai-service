@@ -14,7 +14,7 @@ from fastapi import Request
 from app.core.errors import ServiceError
 from app.core.settings import settings
 
-logger = logging.getLogger("duvarai.service.admin_auth")
+logger = logging.getLogger("umai.service.admin_auth")
 
 _ALL_ROLES = [
     "platform-admin",
@@ -120,9 +120,9 @@ async def get_admin_principal(request: Request) -> AdminPrincipal:
 
     When ``enforce_admin_jwt`` is False (default), the service operates in
     network-trust mode — callers on the ``umai-public`` Docker network are
-    treated as platform-level admins with all roles.  Set
-    ``DUVARAI_ENFORCE_ADMIN_JWT=true`` and supply
-    ``DUVARAI_ADMIN_JWT_HS256_SECRET`` to require explicit JWT auth.
+    treated as platform-level admins with all roles. Set
+    ``UMAI_ENFORCE_ADMIN_JWT=true`` and supply
+    ``UMAI_ADMIN_JWT_HS256_SECRET`` to require explicit JWT auth.
     """
     if not _use_jwt_admin_auth():
         return AdminPrincipal(

@@ -1,1 +1,1 @@
-"""API routers for DuvarAI Service."""
+"""API routers for UMAI Service."""

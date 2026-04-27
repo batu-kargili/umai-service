@@ -578,6 +578,11 @@ class AuditEventResponse(BaseModel):
     conversation_id: str | None = None
     message: str | None = None
     triggering_policy: dict | None = None
+    run_id: str | None = None
+    step_id: str | None = None
+    agent_id: str | None = None
+    agent_did: str | None = None
+    action_resource: dict | None = None
     redacted: bool = False
     prev_event_hash: str | None = None
     event_hash: str | None = None
@@ -703,6 +708,14 @@ class AgentRegistryUpsertRequest(BaseModel):
     owner: str | None = None
     risk_tier: RegistryRiskTier = "MEDIUM"
     status: RegistryStatus = "ACTIVE"
+    agent_did: str | None = None
+    public_key_fingerprint: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    trust_score: float = Field(default=0.25, ge=0.0, le=1.0)
+    trust_tier: str = "SANDBOX"
+    identity_status: str = "UNREGISTERED"
+    kill_switch_enabled: bool = False
+    kill_switch_reason: str | None = None
     metadata: dict | None = None
 
 
@@ -716,6 +729,95 @@ class AgentRegistryResponse(BaseModel):
     owner: str | None = None
     risk_tier: RegistryRiskTier
     status: RegistryStatus
+    agent_did: str | None = None
+    public_key_fingerprint: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    trust_score: float = 0.25
+    trust_tier: str = "SANDBOX"
+    identity_status: str = "UNREGISTERED"
+    kill_switch_enabled: bool = False
+    kill_switch_reason: str | None = None
+    last_seen_at: dt.datetime | None = None
     metadata: dict | None = None
     created_at: dt.datetime | None = None
     updated_at: dt.datetime | None = None
+
+
+class AgentBootstrapTokenRequest(BaseModel):
+    tenant_id: uuid.UUID
+    environment_id: str
+    project_id: str
+    expires_in_seconds: int = Field(default=900, ge=60, le=86400)
+    created_by: str | None = None
+
+
+class AgentBootstrapTokenResponse(BaseModel):
+    token_id: uuid.UUID
+    tenant_id: uuid.UUID
+    environment_id: str
+    project_id: str
+    agent_id: str
+    bootstrap_token: str
+    expires_at: dt.datetime
+
+
+class AgentKillSwitchRequest(BaseModel):
+    tenant_id: uuid.UUID
+    environment_id: str
+    project_id: str
+    enabled: bool = True
+    reason: str | None = None
+
+
+class AgentRunSessionResponse(BaseModel):
+    tenant_id: uuid.UUID
+    environment_id: str
+    project_id: str
+    run_id: str
+    agent_id: str
+    agent_did: str
+    guardrail_id: str | None = None
+    status: str
+    decision_action: str | None = None
+    decision_severity: str | None = None
+    trust_score: float | None = None
+    trust_tier: str | None = None
+    summary: dict | None = None
+    started_at: dt.datetime | None = None
+    updated_at: dt.datetime | None = None
+    completed_at: dt.datetime | None = None
+    step_count: int = 0
+
+
+class AgentRunStepResponse(BaseModel):
+    run_id: str
+    step_id: str
+    parent_step_id: str | None = None
+    sequence: int
+    event_type: str
+    phase: str | None = None
+    status: str
+    agent_id: str
+    agent_did: str
+    action: str | None = None
+    resource_type: str | None = None
+    resource_name: str | None = None
+    decision_action: str | None = None
+    decision_severity: str | None = None
+    decision_reason: str | None = None
+    policy_id: str | None = None
+    matched_rule_id: str | None = None
+    latency_ms: float | None = None
+    payload_summary: str | None = None
+    metadata: dict | None = None
+    input_hash: str | None = None
+    output_hash: str | None = None
+    prev_step_hash: str | None = None
+    step_hash: str | None = None
+    audit_event_id: uuid.UUID | None = None
+    created_at: dt.datetime | None = None
+
+
+class AgentRunDetailResponse(AgentRunSessionResponse):
+    steps: list[AgentRunStepResponse] = Field(default_factory=list)
+    audit_events: list[AuditEventResponse] = Field(default_factory=list)

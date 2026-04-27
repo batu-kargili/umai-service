@@ -153,7 +153,7 @@ AGENTIC_SCHEMA: dict[str, Any] = {
     },
 }
 
-SYSTEM_PROMPT_PREFIX = """You are DuvarAI Guardrail Builder. Generate a guardrail and policy set for an AI agent based on the questionnaire.
+SYSTEM_PROMPT_PREFIX = """You are UMAI Guardrail Builder. Generate a guardrail and policy set for an AI agent based on the questionnaire.
 Return JSON that matches the provided schema exactly. Use only these policy types:
 - HEURISTIC: config has { target, rules, max_length } where rules = [{ id, mode, pattern, block_on_match }]
 - CONTEXT_AWARE: config has { target, instructions, definitions_and_category_map, examples, output_schema, min_confidence_for_block, fail_closed_on_error }

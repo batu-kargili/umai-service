@@ -34,7 +34,7 @@ run_migrations() {
   done
 }
 
-if [ -n "${DUVARAI_DATABASE_URL:-}" ] && is_truthy "${UMAI_RUN_DB_MIGRATIONS:-true}"; then
+if [ -n "${UMAI_DATABASE_URL:-}" ] && is_truthy "${UMAI_RUN_DB_MIGRATIONS:-true}"; then
   run_migrations
 fi
 

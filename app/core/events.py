@@ -17,7 +17,7 @@ from app.core.siem import emit_guardrail_event
 from app.core.settings import settings
 from app.models.db import ApprovalRequest, AuditEvent
 from app.models.engine import EngineResponse
-from app.models.public import PublicGuardRequest
+from app.models.public import AgentSignedContext, PublicGuardRequest
 
 
 def _extract_message(payload: PublicGuardRequest) -> str | None:
@@ -52,6 +52,8 @@ async def record_audit_event(
     guardrail_version: int,
     engine_response: EngineResponse,
     request_payload: PublicGuardRequest | None = None,
+    agent_context: AgentSignedContext | None = None,
+    action_resource: dict | None = None,
 ) -> None:
     request_payload_json = None
     message = None
@@ -128,6 +130,11 @@ async def record_audit_event(
         "request_payload_json": request_payload_json,
         "response_payload_json": response_payload_json,
         "triggering_policy_json": triggering_policy_json,
+        "run_id": agent_context.run_id if agent_context else None,
+        "step_id": agent_context.step_id if agent_context else None,
+        "agent_id": agent_context.agent_id if agent_context else None,
+        "agent_did": agent_context.agent_did if agent_context else None,
+        "action_resource": action_resource,
     }
     event_hash = compute_event_hash(prev_event_hash, ledger_payload)
     event_signature, hash_key_id = sign_event_hash(
@@ -154,6 +161,13 @@ async def record_audit_event(
         request_payload_json=request_payload_json,
         response_payload_json=response_payload_json,
         triggering_policy_json=triggering_policy_json,
+        run_id=agent_context.run_id if agent_context else None,
+        step_id=agent_context.step_id if agent_context else None,
+        agent_id=agent_context.agent_id if agent_context else None,
+        agent_did=agent_context.agent_did if agent_context else None,
+        action_resource_json=json.dumps(action_resource, separators=(",", ":"), ensure_ascii=True)
+        if action_resource
+        else None,
         prev_event_hash=prev_event_hash,
         event_hash=event_hash,
         event_signature=event_signature,
@@ -190,7 +204,7 @@ async def record_audit_event(
             )
 
     siem_event = {
-        "schema": "duvarai.guardrail.decision.v1",
+        "schema": "umai.guardrail.decision.v1",
         "tenant_id": str(tenant_id),
         "environment_id": environment_id,
         "project_id": project_id,
@@ -204,6 +218,11 @@ async def record_audit_event(
         "reason": engine_response.decision.reason,
         "latency_ms_total": engine_response.latency_ms.total,
         "triggering_policy": triggering_policy_payload,
+        "run_id": agent_context.run_id if agent_context else None,
+        "step_id": agent_context.step_id if agent_context else None,
+        "agent_id": agent_context.agent_id if agent_context else None,
+        "agent_did": agent_context.agent_did if agent_context else None,
+        "action_resource": action_resource,
         "errors": [error.model_dump() for error in engine_response.errors],
         "prev_event_hash": prev_event_hash,
         "event_hash": event_hash,

@@ -25,13 +25,13 @@ target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
-    env_url = os.getenv("DUVARAI_DATABASE_URL")
+    env_url = os.getenv("UMAI_DATABASE_URL")
     if env_url:
         return env_url
     ini_url = config.get_main_option("sqlalchemy.url")
     if ini_url:
         return ini_url
-    raise RuntimeError("DUVARAI_DATABASE_URL is not set")
+    raise RuntimeError("UMAI_DATABASE_URL is not set")
 
 
 def run_migrations_offline() -> None:

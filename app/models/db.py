@@ -155,6 +155,11 @@ class AuditEvent(Base):
     request_payload_json: Mapped[str | None] = mapped_column(UnicodeText)
     response_payload_json: Mapped[str | None] = mapped_column(UnicodeText)
     triggering_policy_json: Mapped[str | None] = mapped_column(UnicodeText)
+    run_id: Mapped[str | None] = mapped_column(String(64))
+    step_id: Mapped[str | None] = mapped_column(String(64))
+    agent_id: Mapped[str | None] = mapped_column(String(64))
+    agent_did: Mapped[str | None] = mapped_column(String(256))
+    action_resource_json: Mapped[str | None] = mapped_column(UnicodeText)
     prev_event_hash: Mapped[str | None] = mapped_column(String(64))
     event_hash: Mapped[str | None] = mapped_column(String(64))
     event_signature: Mapped[str | None] = mapped_column(String(128))
@@ -322,11 +327,134 @@ class AgentRegistryEntry(Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'ACTIVE'")
     )
+    agent_did: Mapped[str | None] = mapped_column(String(256))
+    public_key_fingerprint: Mapped[str | None] = mapped_column(String(128))
+    capabilities_json: Mapped[str | None] = mapped_column(UnicodeText)
+    trust_score: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0.25"))
+    trust_tier: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=text("'SANDBOX'")
+    )
+    identity_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=text("'UNREGISTERED'")
+    )
+    kill_switch_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    kill_switch_reason: Mapped[str | None] = mapped_column(UnicodeText)
+    last_seen_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[str | None] = mapped_column(UnicodeText)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
     )
     updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentIdentityBootstrapToken(Base):
+    __tablename__ = "agent_identity_bootstrap_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    environment_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class AgentIdentityCredential(Base):
+    __tablename__ = "agent_identity_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    environment_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_did: Mapped[str] = mapped_column(String(256), nullable=False)
+    public_key_b64: Mapped[str] = mapped_column(UnicodeText, nullable=False)
+    public_key_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, server_default=text("'ACTIVE'"))
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    rotated_from_credential_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    bootstrap_token_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class AgentIdentityNonce(Base):
+    __tablename__ = "agent_identity_nonces"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    environment_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(128), nullable=False)
+    signed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class AgentRunSession(Base):
+    __tablename__ = "agent_run_sessions"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
+    environment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_did: Mapped[str] = mapped_column(String(256), nullable=False)
+    guardrail_id: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), nullable=False, server_default=text("'RUNNING'"))
+    decision_action: Mapped[str | None] = mapped_column(String(32))
+    decision_severity: Mapped[str | None] = mapped_column(String(16))
+    trust_score: Mapped[float | None] = mapped_column(Float)
+    trust_tier: Mapped[str | None] = mapped_column(String(24))
+    summary_json: Mapped[str | None] = mapped_column(UnicodeText)
+    started_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentRunStep(Base):
+    __tablename__ = "agent_run_steps"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
+    environment_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    step_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    parent_step_id: Mapped[str | None] = mapped_column(String(64))
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    phase: Mapped[str | None] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), nullable=False, server_default=text("'RECORDED'"))
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_did: Mapped[str] = mapped_column(String(256), nullable=False)
+    action: Mapped[str | None] = mapped_column(String(64))
+    resource_type: Mapped[str | None] = mapped_column(String(64))
+    resource_name: Mapped[str | None] = mapped_column(String(256))
+    decision_action: Mapped[str | None] = mapped_column(String(32))
+    decision_severity: Mapped[str | None] = mapped_column(String(16))
+    decision_reason: Mapped[str | None] = mapped_column(UnicodeText)
+    policy_id: Mapped[str | None] = mapped_column(String(128))
+    matched_rule_id: Mapped[str | None] = mapped_column(String(128))
+    latency_ms: Mapped[float | None] = mapped_column(Float)
+    payload_summary: Mapped[str | None] = mapped_column(UnicodeText)
+    metadata_json: Mapped[str | None] = mapped_column(UnicodeText)
+    input_hash: Mapped[str | None] = mapped_column(String(64))
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    prev_step_hash: Mapped[str | None] = mapped_column(String(64))
+    step_hash: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
 
 
 class EvaluationRun(Base):

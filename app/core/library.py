@@ -122,7 +122,7 @@ PROMPT_INJECTION_CONFIG = {
 
 MODERATION_INSTRUCTIONS = textwrap.dedent(
     """\
-    DuvarAI Moderation Policy
+    UMAI Moderation Policy
     INSTRUCTIONS
 
     1. Review the exact Content, including slang and obfuscation.
@@ -211,7 +211,7 @@ MODERATION_EXAMPLES = textwrap.dedent(
 
 TURKIYE_INSTRUCTIONS = textwrap.dedent(
     """\
-    DuvarAI Turkiye Politics and Religion Policy
+    UMAI Turkiye Politics and Religion Policy
     INSTRUCTIONS
 
     1. Review the exact Content, including slang and coded references.
@@ -373,7 +373,7 @@ OWASP_SENSITIVE_DISCLOSURE_CONFIG = {
 
 OWASP_SYSTEM_PROMPT_LEAKAGE_INSTRUCTIONS = textwrap.dedent(
     """\
-    DuvarAI OWASP LLM07 System Prompt Leakage Policy
+    UMAI OWASP LLM07 System Prompt Leakage Policy
     INSTRUCTIONS
 
     1. Review the exact Content.
@@ -528,7 +528,7 @@ OWASP_UNSAFE_OUTPUT_CONFIG = {
 
 OWASP_EXCESSIVE_AGENCY_INSTRUCTIONS = textwrap.dedent(
     """\
-    DuvarAI OWASP LLM06 Excessive Agency Policy
+    UMAI OWASP LLM06 Excessive Agency Policy
     INSTRUCTIONS
 
     1. Review the exact Content as a proposed tool call, MCP request, or memory operation.
@@ -624,7 +624,7 @@ OWASP_EXCESSIVE_AGENCY_CONFIG = {
 
 OWASP_MISINFORMATION_INSTRUCTIONS = textwrap.dedent(
     """\
-    DuvarAI OWASP LLM09 Misinformation Policy
+    UMAI OWASP LLM09 Misinformation Policy
     INSTRUCTIONS
 
     1. Review the exact assistant output.
@@ -804,7 +804,7 @@ TELECOM_SUBSCRIBER_SECRECY_CONFIG = {
 
 KVKK_GDPR_PRIVACY_INSTRUCTIONS = textwrap.dedent(
     """\
-    DuvarAI KVKK and GDPR Telecom Privacy Policy
+    UMAI KVKK and GDPR Telecom Privacy Policy
     INSTRUCTIONS
 
     1. Review the exact Content, including implied data processing, sharing, retention, profiling, or transfer.
@@ -906,7 +906,7 @@ KVKK_GDPR_PRIVACY_CONFIG = {
 
 TELECOM_SOCIAL_ENGINEERING_INSTRUCTIONS = textwrap.dedent(
     """\
-    DuvarAI Telecom Social Engineering and Adversarial Abuse Policy
+    UMAI Telecom Social Engineering and Adversarial Abuse Policy
     INSTRUCTIONS
 
     1. Review the exact Content for impersonation, fraud, surveillance abuse, or account-takeover behavior.

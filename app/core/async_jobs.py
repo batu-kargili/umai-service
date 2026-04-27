@@ -6,7 +6,25 @@ import json
 import logging
 import uuid
 
-logger = logging.getLogger("duvarai.service.async_jobs")
+logger = logging.getLogger("umai.service.async_jobs")
+
+
+def _extract_action_resource(request_payload) -> dict | None:
+    if not request_payload.input.artifacts:
+        return None
+    artifact = request_payload.input.artifacts[0]
+    metadata = artifact.metadata or {}
+    return {
+        "artifact_type": artifact.artifact_type,
+        "name": artifact.name,
+        "action": metadata.get("action"),
+        "tool_name": metadata.get("tool_name"),
+        "server_name": metadata.get("server_name"),
+        "method": metadata.get("method"),
+        "memory_scope": metadata.get("memory_scope"),
+        "resource_id": metadata.get("resource_id"),
+        "classification": metadata.get("classification"),
+    }
 
 
 def schedule_guardrail_job(job_id: uuid.UUID) -> None:
@@ -105,6 +123,9 @@ async def _execute_guardrail_job(job_id: uuid.UUID) -> None:
             input=request_payload.input,
             timeout_ms=request_payload.timeout_ms,
             flags=EngineFlags(allow_llm_calls=allow_llm_calls),
+            agent_context=request_payload.agent_context.model_dump(mode="json")
+            if request_payload.agent_context
+            else None,
         )
         engine_response = await evaluate_engine(engine_request)
 
@@ -143,7 +164,9 @@ async def _execute_guardrail_job(job_id: uuid.UUID) -> None:
                         guardrail_id=guardrail_id,
                         guardrail_version=guardrail_version,
                         engine_response=engine_response,
-                        request_payload=None,
+                        request_payload=request_payload,
+                        agent_context=request_payload.agent_context,
+                        action_resource=_extract_action_resource(request_payload),
                     )
                     row = await session.get(GuardrailJob, job_id)
                     if row:

@@ -10,7 +10,7 @@ from collections import Counter
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, Query, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import ValidationError
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from app.core.admin_auth import (
     get_admin_principal,
     require_admin_role,
 )
+from app.core.agent_mesh import hash_secret
 from app.core.eval_gate import resolve_publish_gate
 from app.core.agentic_builder import generate_agentic_guardrail
 from app.core.auth import hash_api_key
@@ -48,7 +49,10 @@ from app.core.snapshot_signing import pack_snapshot_record, sign_snapshot
 from app.models import admin as admin_models
 from app.models.engine import EngineFlags, EngineRequest
 from app.models.db import (
+    AgentIdentityBootstrapToken,
     AgentRegistryEntry,
+    AgentRunSession,
+    AgentRunStep,
     ApprovalRequest,
     ApiKey,
     AuditEvent,
@@ -73,7 +77,7 @@ router = APIRouter(
     tags=["admin"],
     dependencies=[Depends(get_admin_principal)],
 )
-logger = logging.getLogger("duvarai.service.admin")
+logger = logging.getLogger("umai.service.admin")
 
 DEFAULT_PREFLIGHT = {"target": "LAST_MESSAGE", "rules": [], "max_length": 8000}
 PHASE_ORDER = (
@@ -573,6 +577,7 @@ def _publish_gate_to_response(gate: GuardrailPublishGate) -> admin_models.Publis
 
 def _audit_event_to_response(event: AuditEvent) -> admin_models.AuditEventResponse:
     triggering_policy = _load_json(event.triggering_policy_json)
+    action_resource = _load_json(event.action_resource_json)
     return admin_models.AuditEventResponse(
         id=event.id,
         tenant_id=event.tenant_id,
@@ -591,6 +596,11 @@ def _audit_event_to_response(event: AuditEvent) -> admin_models.AuditEventRespon
         conversation_id=event.conversation_id,
         message=event.message,
         triggering_policy=triggering_policy,
+        run_id=event.run_id,
+        step_id=event.step_id,
+        agent_id=event.agent_id,
+        agent_did=event.agent_did,
+        action_resource=action_resource if isinstance(action_resource, dict) else None,
         redacted=bool(event.redacted),
         prev_event_hash=event.prev_event_hash,
         event_hash=event.event_hash,
@@ -608,6 +618,8 @@ def _build_evidence_summary(
     action_counter = Counter(event.action for event in events)
     phase_counter = Counter(event.phase for event in events)
     severity_counter = Counter((event.decision_severity or "UNKNOWN") for event in events)
+    agent_counter = Counter(event.agent_id for event in events if event.agent_id)
+    run_counter = Counter(event.run_id for event in events if event.run_id)
     policy_counter: Counter[str] = Counter()
     for event in events:
         policy = _load_json(event.triggering_policy_json)
@@ -623,6 +635,8 @@ def _build_evidence_summary(
         "phases": dict(phase_counter),
         "severities": dict(severity_counter),
         "top_policies": policy_counter.most_common(10),
+        "top_agents": agent_counter.most_common(10),
+        "agent_runs": len(run_counter),
         "approvals": dict(approval_counter),
         "guardrail_versions": len(versions),
         "signed_versions": sum(1 for version in versions if bool(version.signature)),
@@ -703,7 +717,66 @@ def _model_registry_to_response(row: ModelRegistryEntry) -> admin_models.ModelRe
     )
 
 
+def _agent_run_to_response(row: AgentRunSession, step_count: int = 0) -> admin_models.AgentRunSessionResponse:
+    summary = _load_json(row.summary_json)
+    return admin_models.AgentRunSessionResponse(
+        tenant_id=row.tenant_id,
+        environment_id=row.environment_id,
+        project_id=row.project_id,
+        run_id=row.run_id,
+        agent_id=row.agent_id,
+        agent_did=row.agent_did,
+        guardrail_id=row.guardrail_id,
+        status=row.status,
+        decision_action=row.decision_action,
+        decision_severity=row.decision_severity,
+        trust_score=row.trust_score,
+        trust_tier=row.trust_tier,
+        summary=summary if isinstance(summary, dict) else None,
+        started_at=row.started_at,
+        updated_at=row.updated_at,
+        completed_at=row.completed_at,
+        step_count=step_count,
+    )
+
+
+def _agent_step_to_response(
+    row: AgentRunStep,
+    audit_event_id: uuid.UUID | None = None,
+) -> admin_models.AgentRunStepResponse:
+    metadata = _load_json(row.metadata_json)
+    return admin_models.AgentRunStepResponse(
+        run_id=row.run_id,
+        step_id=row.step_id,
+        parent_step_id=row.parent_step_id,
+        sequence=row.sequence,
+        event_type=row.event_type,
+        phase=row.phase,
+        status=row.status,
+        agent_id=row.agent_id,
+        agent_did=row.agent_did,
+        action=row.action,
+        resource_type=row.resource_type,
+        resource_name=row.resource_name,
+        decision_action=row.decision_action,
+        decision_severity=row.decision_severity,
+        decision_reason=row.decision_reason,
+        policy_id=row.policy_id,
+        matched_rule_id=row.matched_rule_id,
+        latency_ms=row.latency_ms,
+        payload_summary=row.payload_summary,
+        metadata=metadata if isinstance(metadata, dict) else None,
+        input_hash=row.input_hash,
+        output_hash=row.output_hash,
+        prev_step_hash=row.prev_step_hash,
+        step_hash=row.step_hash,
+        audit_event_id=audit_event_id,
+        created_at=row.created_at,
+    )
+
+
 def _agent_registry_to_response(row: AgentRegistryEntry) -> admin_models.AgentRegistryResponse:
+    capabilities = _load_json(row.capabilities_json)
     return admin_models.AgentRegistryResponse(
         tenant_id=row.tenant_id,
         environment_id=row.environment_id,
@@ -714,6 +787,15 @@ def _agent_registry_to_response(row: AgentRegistryEntry) -> admin_models.AgentRe
         owner=row.owner,
         risk_tier=row.risk_tier,
         status=row.status,
+        agent_did=row.agent_did,
+        public_key_fingerprint=row.public_key_fingerprint,
+        capabilities=capabilities if isinstance(capabilities, list) else [],
+        trust_score=float(row.trust_score or 0.0),
+        trust_tier=row.trust_tier,
+        identity_status=row.identity_status,
+        kill_switch_enabled=bool(row.kill_switch_enabled),
+        kill_switch_reason=row.kill_switch_reason,
+        last_seen_at=row.last_seen_at,
         metadata=_load_json(row.metadata_json),
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -2689,7 +2771,7 @@ async def purge_audit_events(
         if retain_days is None:
             raise ServiceError(
                 "INVALID_REQUEST",
-                "Provide before or retain_days (or configure DUVARAI_AUDIT_DEFAULT_RETENTION_DAYS)",
+                "Provide before or retain_days (or configure UMAI_AUDIT_DEFAULT_RETENTION_DAYS)",
                 422,
             )
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=retain_days)
@@ -2981,6 +3063,16 @@ async def upsert_model_registry_entry(
             row.owner = payload.owner
             row.risk_tier = payload.risk_tier
             row.status = payload.status
+            row.agent_did = payload.agent_did
+            row.public_key_fingerprint = payload.public_key_fingerprint
+            row.capabilities_json = json.dumps(
+                payload.capabilities, separators=(",", ":"), ensure_ascii=True
+            )
+            row.trust_score = payload.trust_score
+            row.trust_tier = payload.trust_tier
+            row.identity_status = payload.identity_status
+            row.kill_switch_enabled = payload.kill_switch_enabled
+            row.kill_switch_reason = payload.kill_switch_reason
             row.metadata_json = (
                 json.dumps(payload.metadata, separators=(",", ":"), ensure_ascii=True)
                 if payload.metadata is not None
@@ -3087,3 +3179,167 @@ async def list_agent_registry_entries(
             result = await session.execute(stmt)
             rows = result.scalars().all()
     return [_agent_registry_to_response(row) for row in rows]
+
+
+@router.post(
+    "/registry/agents/{agent_id}/bootstrap-token",
+    response_model=admin_models.AgentBootstrapTokenResponse,
+)
+async def create_agent_bootstrap_token(
+    agent_id: str,
+    payload: admin_models.AgentBootstrapTokenRequest,
+    session: AsyncSession = Depends(get_session),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> admin_models.AgentBootstrapTokenResponse:
+    _require_tenant_access(principal, payload.tenant_id)
+    now = dt.datetime.now(dt.timezone.utc)
+    raw_token = "umai_abt_" + secrets.token_urlsafe(32)
+    async with session.begin():
+        async with tenant_scope(session, str(payload.tenant_id)):
+            row = await session.get(
+                AgentRegistryEntry,
+                (payload.tenant_id, payload.environment_id, payload.project_id, agent_id),
+            )
+            if row is None:
+                raise ServiceError("AGENT_NOT_FOUND", "Agent registry entry not found", 404)
+            token = AgentIdentityBootstrapToken(
+                tenant_id=payload.tenant_id,
+                environment_id=payload.environment_id,
+                project_id=payload.project_id,
+                agent_id=agent_id,
+                token_hash=hash_secret(raw_token),
+                expires_at=now + dt.timedelta(seconds=payload.expires_in_seconds),
+                created_by=payload.created_by,
+                created_at=now,
+            )
+            session.add(token)
+        await session.flush()
+    return admin_models.AgentBootstrapTokenResponse(
+        token_id=token.id,
+        tenant_id=payload.tenant_id,
+        environment_id=payload.environment_id,
+        project_id=payload.project_id,
+        agent_id=agent_id,
+        bootstrap_token=raw_token,
+        expires_at=token.expires_at,
+    )
+
+
+@router.post(
+    "/registry/agents/{agent_id}/kill-switch",
+    response_model=admin_models.AgentRegistryResponse,
+)
+async def update_agent_kill_switch(
+    agent_id: str,
+    payload: admin_models.AgentKillSwitchRequest,
+    session: AsyncSession = Depends(get_session),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> admin_models.AgentRegistryResponse:
+    _require_tenant_access(principal, payload.tenant_id)
+    async with session.begin():
+        async with tenant_scope(session, str(payload.tenant_id)):
+            row = await session.get(
+                AgentRegistryEntry,
+                (payload.tenant_id, payload.environment_id, payload.project_id, agent_id),
+            )
+            if row is None:
+                raise ServiceError("AGENT_NOT_FOUND", "Agent registry entry not found", 404)
+            row.kill_switch_enabled = payload.enabled
+            row.kill_switch_reason = payload.reason
+            row.updated_at = dt.datetime.now(dt.timezone.utc)
+    return _agent_registry_to_response(row)
+
+
+@router.get("/agent-runs", response_model=list[admin_models.AgentRunSessionResponse])
+async def list_agent_runs(
+    environment_id: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
+    agent_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    decision: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> list[admin_models.AgentRunSessionResponse]:
+    _require_tenant_access(principal, x_tenant_id, required_role="tenant-auditor")
+    stmt = select(AgentRunSession).where(AgentRunSession.tenant_id == x_tenant_id)
+    if environment_id:
+        stmt = stmt.where(AgentRunSession.environment_id == environment_id)
+    if project_id:
+        stmt = stmt.where(AgentRunSession.project_id == project_id)
+    if agent_id:
+        stmt = stmt.where(AgentRunSession.agent_id == agent_id)
+    if status:
+        stmt = stmt.where(AgentRunSession.status == status)
+    if decision:
+        stmt = stmt.where(AgentRunSession.decision_action == decision)
+    stmt = stmt.order_by(AgentRunSession.started_at.desc()).limit(limit)
+    async with session.begin():
+        async with tenant_scope(session, str(x_tenant_id)):
+            result = await session.execute(stmt)
+            runs = result.scalars().all()
+            responses: list[admin_models.AgentRunSessionResponse] = []
+            for run in runs:
+                count_result = await session.execute(
+                    select(func.count()).where(
+                        AgentRunStep.tenant_id == run.tenant_id,
+                        AgentRunStep.environment_id == run.environment_id,
+                        AgentRunStep.project_id == run.project_id,
+                        AgentRunStep.run_id == run.run_id,
+                    )
+                )
+                responses.append(_agent_run_to_response(run, int(count_result.scalar_one() or 0)))
+    return responses
+
+
+@router.get(
+    "/agent-runs/{run_id}",
+    response_model=admin_models.AgentRunDetailResponse,
+)
+async def get_agent_run(
+    run_id: str,
+    environment_id: str = Query(...),
+    project_id: str = Query(...),
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> admin_models.AgentRunDetailResponse:
+    _require_tenant_access(principal, x_tenant_id, required_role="tenant-auditor")
+    async with session.begin():
+        async with tenant_scope(session, str(x_tenant_id)):
+            run = await session.get(
+                AgentRunSession,
+                (x_tenant_id, environment_id, project_id, run_id),
+            )
+            if run is None:
+                raise ServiceError("AGENT_RUN_NOT_FOUND", "Agent run not found", 404)
+            step_result = await session.execute(
+                select(AgentRunStep)
+                .where(
+                    AgentRunStep.tenant_id == x_tenant_id,
+                    AgentRunStep.environment_id == environment_id,
+                    AgentRunStep.project_id == project_id,
+                    AgentRunStep.run_id == run_id,
+                )
+                .order_by(AgentRunStep.sequence.asc())
+            )
+            steps = step_result.scalars().all()
+            event_result = await session.execute(
+                select(AuditEvent)
+                .where(
+                    AuditEvent.tenant_id == x_tenant_id,
+                    AuditEvent.environment_id == environment_id,
+                    AuditEvent.project_id == project_id,
+                    AuditEvent.run_id == run_id,
+                )
+                .order_by(AuditEvent.created_at.asc())
+            )
+            events = event_result.scalars().all()
+    audit_by_step = {event.step_id: event.id for event in events if event.step_id}
+    base = _agent_run_to_response(run, len(steps)).model_dump()
+    return admin_models.AgentRunDetailResponse(
+        **base,
+        steps=[_agent_step_to_response(step, audit_by_step.get(step.step_id)) for step in steps],
+        audit_events=[_audit_event_to_response(event) for event in events],
+    )

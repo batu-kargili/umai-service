@@ -7,7 +7,7 @@ from sqlalchemy.engine import make_url
 
 from app.core.settings import settings
 
-logger = logging.getLogger("duvarai.service.runtime")
+logger = logging.getLogger("umai.service.runtime")
 
 _ENGINE_ALIASES = {
     "postgres": "postgresql",
@@ -27,7 +27,7 @@ _SUPPORTED_DRIVERS = {
 
 
 def _runtime_environment() -> str:
-    for key in ("DUVARAI_ENVIRONMENT", "APP_ENV", "ENVIRONMENT", "NODE_ENV"):
+    for key in ("UMAI_ENVIRONMENT", "APP_ENV", "ENVIRONMENT", "NODE_ENV"):
         raw = os.getenv(key)
         if raw and raw.strip():
             return raw.strip().lower()
@@ -41,7 +41,7 @@ def _is_production() -> bool:
 def _normalize_database_engine(value: str) -> str:
     normalized = _ENGINE_ALIASES.get(value.strip().lower())
     if not normalized:
-        raise RuntimeError(f"Unsupported DUVARAI_DATABASE_ENGINE value: {value}")
+        raise RuntimeError(f"Unsupported UMAI_DATABASE_ENGINE value: {value}")
     return normalized
 
 
@@ -61,7 +61,7 @@ def _database_engine_from_driver(drivername: str) -> str:
 def validate_database_configuration() -> tuple[str, str]:
     """Validate the configured database engine/driver combination."""
     if not settings.database_url:
-        raise RuntimeError("DUVARAI_DATABASE_URL is not set")
+        raise RuntimeError("UMAI_DATABASE_URL is not set")
 
     drivername = make_url(settings.database_url).drivername.lower()
     inferred_engine = _database_engine_from_driver(drivername)
@@ -76,7 +76,7 @@ def validate_database_configuration() -> tuple[str, str]:
     )
     if configured_engine != inferred_engine:
         raise RuntimeError(
-            f"DUVARAI_DATABASE_ENGINE={configured_engine} does not match driver {drivername}"
+            f"UMAI_DATABASE_ENGINE={configured_engine} does not match driver {drivername}"
         )
 
     supported_drivers = _SUPPORTED_DRIVERS.get(configured_engine)
@@ -103,7 +103,7 @@ def validate_service_runtime() -> None:
 
     if not settings.database_url:
         warnings.append(
-            "DUVARAI_DATABASE_URL is not set - all database-backed endpoints will fail"
+            "UMAI_DATABASE_URL is not set - all database-backed endpoints will fail"
         )
     else:
         try:
@@ -118,64 +118,64 @@ def validate_service_runtime() -> None:
 
     if not settings.ai_engine_base_url:
         warnings.append(
-            "DUVARAI_AI_ENGINE_BASE_URL (or ENGINE_URL) is not set - "
+            "UMAI_AI_ENGINE_BASE_URL (or ENGINE_URL) is not set - "
             "guardrail evaluation will be unavailable"
         )
 
     admin_auth_mode = (settings.admin_auth_mode or "").strip().lower()
     if admin_auth_mode and admin_auth_mode not in {"development", "network-trust", "jwt"}:
         raise RuntimeError(
-            "DUVARAI_ADMIN_AUTH_MODE must be one of development, network-trust, or jwt"
+            "UMAI_ADMIN_AUTH_MODE must be one of development, network-trust, or jwt"
         )
 
     if production and not settings.redis_url:
         raise RuntimeError(
-            "Production runtime requires DUVARAI_REDIS_URL for published guardrail snapshots"
+            "Production runtime requires UMAI_REDIS_URL for published guardrail snapshots"
         )
 
     snapshot_signing_key = settings.snapshot_signing_key or settings.ledger_signing_key
     if production and not snapshot_signing_key:
         raise RuntimeError(
-            "Production runtime requires DUVARAI_SNAPSHOT_SIGNING_KEY "
-            "(or DUVARAI_LEDGER_SIGNING_KEY) so snapshots are signed"
+            "Production runtime requires UMAI_SNAPSHOT_SIGNING_KEY "
+            "(or UMAI_LEDGER_SIGNING_KEY) so snapshots are signed"
         )
 
     if production and not admin_auth_mode:
         raise RuntimeError(
-            "Production runtime requires DUVARAI_ADMIN_AUTH_MODE to be explicitly set "
+            "Production runtime requires UMAI_ADMIN_AUTH_MODE to be explicitly set "
             "to development, network-trust, or jwt"
         )
 
     jwt_required = settings.enforce_admin_jwt or admin_auth_mode == "jwt"
     if production and admin_auth_mode == "jwt" and not settings.admin_jwt_hs256_secret:
         raise RuntimeError(
-            "Production runtime requires DUVARAI_ADMIN_JWT_HS256_SECRET when "
-            "DUVARAI_ADMIN_AUTH_MODE=jwt"
+            "Production runtime requires UMAI_ADMIN_JWT_HS256_SECRET when "
+            "UMAI_ADMIN_AUTH_MODE=jwt"
         )
     if jwt_required and not settings.admin_jwt_hs256_secret:
         warnings.append(
-            "Admin JWT mode is enabled but DUVARAI_ADMIN_JWT_HS256_SECRET is not set - "
+            "Admin JWT mode is enabled but UMAI_ADMIN_JWT_HS256_SECRET is not set - "
             "all admin requests will fail with AUTH_MISCONFIGURED"
         )
 
     if settings.require_redis and not settings.redis_url:
         warnings.append(
-            "require_redis=true but DUVARAI_REDIS_URL is not set - "
+            "require_redis=true but UMAI_REDIS_URL is not set - "
             "snapshot publishing will fail"
         )
     if settings.redis_url and not snapshot_signing_key:
         warnings.append(
-            "DUVARAI_SNAPSHOT_SIGNING_KEY is not set - "
+            "UMAI_SNAPSHOT_SIGNING_KEY is not set - "
             "published guardrail snapshots will be unsigned"
         )
 
-    license_token = os.getenv("DUVARAI_LICENSE_TOKEN", "").strip()
-    license_public_key = os.getenv("DUVARAI_LICENSE_PUBLIC_KEY", "").strip()
-    license_public_keys = os.getenv("DUVARAI_LICENSE_PUBLIC_KEYS", "").strip()
+    license_token = os.getenv("UMAI_LICENSE_TOKEN", "").strip()
+    license_public_key = os.getenv("UMAI_LICENSE_PUBLIC_KEY", "").strip()
+    license_public_keys = os.getenv("UMAI_LICENSE_PUBLIC_KEYS", "").strip()
     if license_token and not (license_public_key or license_public_keys):
         warnings.append(
-            "DUVARAI_LICENSE_TOKEN is set but no DUVARAI_LICENSE_PUBLIC_KEY "
-            "(or DUVARAI_LICENSE_PUBLIC_KEYS) is configured - "
+            "UMAI_LICENSE_TOKEN is set but no UMAI_LICENSE_PUBLIC_KEY "
+            "(or UMAI_LICENSE_PUBLIC_KEYS) is configured - "
             "license verification will fail"
         )
 

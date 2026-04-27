@@ -8,7 +8,7 @@ from app.core.errors import ServiceError
 from app.core.settings import settings
 from app.models.engine import EngineRequest, EngineResponse
 
-logger = logging.getLogger("duvarai.service.engine")
+logger = logging.getLogger("umai.service.engine")
 
 
 def _engine_url() -> str:

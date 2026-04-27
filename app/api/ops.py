@@ -10,7 +10,7 @@ from app.core.redis import get_redis
 from app.core.settings import settings
 
 router = APIRouter()
-logger = logging.getLogger("duvarai.service.ops")
+logger = logging.getLogger("umai.service.ops")
 
 
 @router.get("/healthz")

@@ -20,7 +20,7 @@ class _CsvFriendlyEnvSource(EnvSettingsSource):
         value: Any,
         value_is_complex: bool,
     ) -> Any:
-        # Allow comma-separated strings for list fields (e.g. DUVARAI_CORS_ALLOW_ORIGINS)
+        # Allow comma-separated strings for list fields (e.g. UMAI_CORS_ALLOW_ORIGINS)
         if (
             value_is_complex
             and isinstance(value, str)
@@ -84,10 +84,11 @@ class Settings(BaseSettings):
     admin_auth_mode: str | None = None
     extension_ingest_bearer_token: str | None = None
     extension_ingest_jwt_hs256_secret: str | None = None
+    extension_device_token_ttl_seconds: int = 60 * 60 * 24 * 30
     extension_policy_json: str | None = None
     extension_bootstrap_public_key_pem: str | None = None
 
-    model_config = SettingsConfigDict(env_prefix="DUVARAI_", case_sensitive=False)
+    model_config = SettingsConfigDict(env_prefix="UMAI_", case_sensitive=False)
 
     @classmethod
     def settings_customise_sources(
@@ -101,7 +102,7 @@ class Settings(BaseSettings):
         del env_settings
         sources = (
             init_settings,
-            _CsvFriendlyEnvSource(settings_cls, env_prefix="DUVARAI_", case_sensitive=False),
+            _CsvFriendlyEnvSource(settings_cls, env_prefix="UMAI_", case_sensitive=False),
             dotenv_settings,
             file_secret_settings,
         )

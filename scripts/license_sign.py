@@ -59,7 +59,7 @@ def _write_output(token: dict, out_path: Path | None) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sign a DuvarAI license payload.")
+    parser = argparse.ArgumentParser(description="Sign a UMAI license payload.")
     parser.add_argument("--payload", required=True, help="Path to payload JSON file.")
     parser.add_argument("--private-key", required=True, help="Path to Ed25519 private key.")
     parser.add_argument("--key-id", default=None, help="Optional key id to embed.")

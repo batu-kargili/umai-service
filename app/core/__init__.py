@@ -1,1 +1,1 @@
-"""Core utilities for DuvarAI Service."""
+"""Core utilities for UMAI Service."""
