@@ -746,6 +746,12 @@ class AiSession(Base):
     analyzed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     # Lease held by an analysis worker while a stage is in flight. A worker that
     # dies mid-stage leaves a stale lease, which the claim query reclaims.
+    # Why the last analysis attempt did not produce a verdict. A timed-out or
+    # over-budget session must not read as "clean".
+    analysis_error: Mapped[str | None] = mapped_column(UnicodeText)
+    analysis_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
     claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     claimed_by: Mapped[str | None] = mapped_column(String(64))
 

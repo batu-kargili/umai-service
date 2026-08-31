@@ -73,6 +73,12 @@ class ClaimResponse(_BaseModel):
     sessions: list[ClaimedSession] = Field(default_factory=list)
 
 
+# A worker that could not produce a verdict says so with this one. Anything
+# else at the triage stage means "not suspicious", which is a claim only a
+# completed analysis is entitled to make.
+VERDICT_ERROR = "error"
+
+
 class ResultRequest(_BaseModel):
     tenant_id: uuid.UUID
     session_key: str
@@ -272,9 +278,35 @@ async def record_analysis_result(
 
             row.claimed_at = None
             row.claimed_by = None
+
+            if payload.verdict == VERDICT_ERROR:
+                # The analysis did not happen. Recording it as benign would
+                # let a timeout or a blown budget clear a session nobody
+                # looked at, which is the failure mode this branch exists to
+                # prevent. Everything else about the session is left alone.
+                row.analysis_status = "analysis_failed"
+                row.analysis_error = payload.reason or "Analysis failed without a reason"
+                row.analysis_attempts = (row.analysis_attempts or 0) + 1
+                row.analyzed_at = now
+                logger.warning(
+                    "analysis.failed stage=%s session=%s attempts=%s reason=%s",
+                    payload.stage,
+                    payload.session_key,
+                    row.analysis_attempts,
+                    row.analysis_error,
+                )
+                return ResultResponse(
+                    session_key=payload.session_key,
+                    analysis_status=row.analysis_status,
+                    finding_raised=False,
+                )
+
             row.threat_tactic = payload.threat_tactic or row.threat_tactic
             row.confidence = payload.confidence
             row.analyzed_at = now
+            # A stage that succeeded clears the previous failure: the session
+            # is no longer waiting on anyone.
+            row.analysis_error = None
 
             if payload.stage == "triage":
                 # Triage is a filter, not a verdict: benign ends the pipeline,
