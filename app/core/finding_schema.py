@@ -151,6 +151,19 @@ def derive_category(rule_id: str | None) -> str:
     return _RULE_CATEGORIES.get(rule_id, CATEGORY_OTHER)
 
 
+# Transcript collection modes (contract: transcript-data-modes.md §2).
+MODE_POSTURE_ONLY: Final = "posture_only"
+MODE_METADATA: Final = "metadata"
+MODE_FULL_SESSION: Final = "full_session"
+
+COLLECTION_MODES: Final[frozenset[str]] = frozenset(
+    {MODE_POSTURE_ONLY, MODE_METADATA, MODE_FULL_SESSION}
+)
+
+# Only this mode stores message and tool content.
+MODES_WITH_CONTENT: Final[frozenset[str]] = frozenset({MODE_FULL_SESSION})
+
+
 SEVERITY_CRITICAL: Final = "critical"
 SEVERITY_HIGH: Final = "high"
 SEVERITY_MEDIUM: Final = "medium"

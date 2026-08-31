@@ -18,6 +18,7 @@ from app.api.analysis import analysis_router
 from app.api.applications import applications_admin_router
 from app.api.extension import ext_admin_router, ext_router
 from app.api.findings import findings_admin_router
+from app.api.sessions import sessions_admin_router
 from app.api.ops import router as ops_router
 from app.core.db import get_sessionmaker
 from app.core.siem_drain import run_drain_loop
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     app.include_router(applications_admin_router)
     # The analysis router serves the pull-based detection worker.
     app.include_router(findings_admin_router)
+    app.include_router(sessions_admin_router)
     app.include_router(analysis_router)
 
     @app.middleware("http")

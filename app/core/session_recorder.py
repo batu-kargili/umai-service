@@ -23,8 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import finding_schema
 from app.core.findings import upsert_finding
 from app.core.posture_rules import evaluate_posture, finding_key
-from app.core.transcript_store import get_transcript_store
-from app.models.db import AiSession
+from app.core.transcript_store import get_transcript_store, transcript_sha256
+from app.models.db import AiSession, Tenant
 
 
 @dataclass
@@ -102,6 +102,16 @@ async def record_agent_sessions(
     store = get_transcript_store()
     collector = collector or {}
 
+    # The tenant's mode decides whether content is stored at all. A collector
+    # that keeps sending full sessions after the mode was narrowed must not be
+    # able to leave content on our disks: refusing to serve it later is no use
+    # if it was written in the first place.
+    tenant = await db.get(Tenant, tenant_id)
+    mode = getattr(tenant, "collection_mode", None)
+    if mode not in finding_schema.COLLECTION_MODES:
+        mode = finding_schema.MODE_POSTURE_ONLY
+    store_content = mode in finding_schema.MODES_WITH_CONTENT
+
     for index, payload in enumerate(sessions):
         source = (payload.get("source") or "").strip()
         source_session_id = (payload.get("session_id") or "").strip()
@@ -114,7 +124,13 @@ async def record_agent_sessions(
         key = session_key(source, source_session_id, raw_log_path)
 
         transcript = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ref, sha, stored_bytes = await store.put(tenant_id, transcript)
+        # The digest is computed in every mode: it is what makes re-ingest
+        # idempotent, and a hash of content is not the content.
+        sha = transcript_sha256(transcript)
+        ref: str | None = None
+        stored_bytes: int | None = None
+        if store_content:
+            ref, sha, stored_bytes = await store.put(tenant_id, transcript)
 
         existing = (
             await db.execute(

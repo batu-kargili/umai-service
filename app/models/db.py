@@ -29,6 +29,11 @@ class Tenant(Base):
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[str] = mapped_column(String(32), server_default=text("'active'"))
+    # What the collector may send and the operator API may return:
+    # `posture_only` | `metadata` | `full_session`.
+    collection_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'metadata'")
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
     )
@@ -717,8 +722,10 @@ class AiSession(Base):
     # permissions. Drives detection without reading a single message.
     posture_json: Mapped[str | None] = mapped_column(UnicodeText)
 
-    transcript_ref: Mapped[str] = mapped_column(UnicodeText, nullable=False)
-    transcript_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Null once retention has reaped the blob, or when the tenant collects in
+    # a mode that stores no content at all.
+    transcript_ref: Mapped[str | None] = mapped_column(UnicodeText)
+    transcript_sha256: Mapped[str | None] = mapped_column(String(64))
     transcript_bytes: Mapped[int | None] = mapped_column(Integer)
 
     collector_name: Mapped[str | None] = mapped_column(String(64))

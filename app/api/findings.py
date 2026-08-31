@@ -4,7 +4,7 @@ The queue is what a SOC analyst actually works from, so it is one canonical
 list across every channel — ADR, extension, SDK, red team — filtered rather
 than split (contract §4.1, UMA-40).
 
-Read access requires `tenant-auditor`; the lifecycle transitions in UMA-46
+Read access requires `tenant-auditor` or `tenant-admin`; the lifecycle transitions in UMA-46
 require more.
 """
 
@@ -128,9 +128,10 @@ class FindingPage(_BaseModel):
 
 
 def _require_read_access(principal: AdminPrincipal, tenant_id: uuid.UUID) -> None:
-    from app.api.admin import _require_tenant_access
+    from app.core.admin_auth import ensure_tenant_access, require_any_admin_role
 
-    _require_tenant_access(principal, tenant_id, required_role="tenant-auditor")
+    ensure_tenant_access(principal, tenant_id)
+    require_any_admin_role(principal, "tenant-auditor", "tenant-admin")
 
 
 def _loads(raw: str | None) -> dict[str, Any] | None:

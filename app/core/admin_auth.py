@@ -151,6 +151,21 @@ def ensure_tenant_access(principal: AdminPrincipal, tenant_id: uuid.UUID) -> Non
         )
 
 
+def require_any_admin_role(principal: AdminPrincipal, *roles: str) -> None:
+    """Raise 403 unless the principal holds at least one of ``roles``.
+
+    Read endpoints take `tenant-auditor` or `tenant-admin`. Requiring an exact
+    match made an admin who may change a finding's status unable to look at
+    it, which is not a policy anyone chose.
+    """
+    if not any(role in principal.roles for role in roles):
+        raise ServiceError(
+            "FORBIDDEN",
+            "One of roles " + ", ".join(sorted(roles)) + " is required for this operation",
+            403,
+        )
+
+
 def require_admin_role(principal: AdminPrincipal, required_role: str = "tenant-admin") -> None:
     """Raise 403 if the principal does not hold the required role."""
     if required_role not in principal.roles:
