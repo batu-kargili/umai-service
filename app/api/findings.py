@@ -25,7 +25,14 @@ from app.core import finding_schema
 from app.core.admin_auth import AdminPrincipal, get_admin_principal
 from app.core.db import get_session, tenant_scope
 from app.core.errors import ServiceError
-from app.models.db import AiSession, Finding, FindingStatusEvent
+from app.core.siem_drain import replay as replay_delivery
+from app.core.siem_outbox import (
+    STATUS_DEAD_LETTER,
+    STATUS_DELIVERED,
+    STATUS_PENDING,
+    delivery_status,
+)
+from app.models.db import AiSession, Finding, FindingStatusEvent, SiemOutbox
 
 logger = logging.getLogger("umai.service.findings")
 
@@ -89,12 +96,28 @@ class SessionContext(_BaseModel):
     observed_at: dt.datetime
 
 
+class DeliveryStatus(_BaseModel):
+    """Where this finding's SIEM delivery stands.
+
+    Answers the question a SOC lead actually asks: did QRadar get it?
+    """
+
+    status: str
+    attempts: int
+    last_error: str | None = None
+    next_attempt_at: dt.datetime | None = None
+    delivered_at: dt.datetime | None = None
+    replayed_at: dt.datetime | None = None
+    replayed_by: str | None = None
+
+
 class FindingDetail(FindingSummary):
     summary: str | None = None
     evidence: dict[str, Any] | None = None
     remediation: dict[str, Any] | None = None
     history: list[StatusEvent] = Field(default_factory=list)
     session: SessionContext | None = None
+    delivery: DeliveryStatus | None = None
 
 
 class FindingPage(_BaseModel):
@@ -257,6 +280,7 @@ async def load_finding(
                 .all()
             )
             ai_session = await session.get(AiSession, (x_tenant_id, row.session_key))
+            outbox = await delivery_status(session, tenant_id=x_tenant_id, event_id=finding_key)
 
     detail = FindingDetail(
         **_summary(row).model_dump(),
@@ -274,6 +298,17 @@ async def load_finding(
             for event in history
         ],
     )
+
+    if outbox is not None:
+        detail.delivery = DeliveryStatus(
+            status=outbox.status,
+            attempts=outbox.attempts,
+            last_error=outbox.last_error,
+            next_attempt_at=outbox.next_attempt_at,
+            delivered_at=outbox.delivered_at,
+            replayed_at=outbox.replayed_at,
+            replayed_by=outbox.replayed_by,
+        )
 
     if ai_session is not None:
         detail.session = SessionContext(
@@ -516,3 +551,87 @@ async def assign_finding_endpoint(
         assignee=payload.assignee,
         actor=principal.subject or "unknown",
     )
+
+
+class DeliveryStats(_BaseModel):
+    """Operator-facing health of the SIEM integration.
+
+    Published here rather than as Prometheus metrics: a scrape surface is
+    G3's job (UMA-88). What an operator needs today is whether findings are
+    reaching the SOC and how old the backlog is.
+    """
+
+    pending: int
+    delivered: int
+    dead_letter: int
+    oldest_pending_age_seconds: float | None = None
+
+
+async def delivery_stats(
+    session: AsyncSession, *, tenant_id: uuid.UUID, now: dt.datetime | None = None
+) -> DeliveryStats:
+    now = now or dt.datetime.now(dt.timezone.utc)
+    async with session.begin():
+        async with tenant_scope(session, str(tenant_id)):
+            rows = (
+                await session.execute(
+                    select(SiemOutbox.status, func.count(), func.min(SiemOutbox.created_at))
+                    .where(SiemOutbox.tenant_id == tenant_id)
+                    .group_by(SiemOutbox.status)
+                )
+            ).all()
+
+    counts = {status: count for status, count, _ in rows}
+    oldest_pending = next(
+        (oldest for status, _, oldest in rows if status == STATUS_PENDING), None
+    )
+
+    age = None
+    if oldest_pending is not None:
+        # SQLite hands back naive datetimes for timezone-aware columns.
+        if oldest_pending.tzinfo is None:
+            oldest_pending = oldest_pending.replace(tzinfo=dt.timezone.utc)
+        age = max((now - oldest_pending).total_seconds(), 0.0)
+
+    return DeliveryStats(
+        pending=counts.get(STATUS_PENDING, 0),
+        delivered=counts.get(STATUS_DELIVERED, 0),
+        dead_letter=counts.get(STATUS_DEAD_LETTER, 0),
+        oldest_pending_age_seconds=age,
+    )
+
+
+@findings_admin_router.get("/siem-delivery/stats", response_model=DeliveryStats)
+async def delivery_stats_endpoint(
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> DeliveryStats:
+    _require_read_access(principal, x_tenant_id)
+    return await delivery_stats(session, tenant_id=x_tenant_id)
+
+
+@findings_admin_router.post(
+    "/findings/{finding_key}/replay-delivery", response_model=FindingDetail
+)
+async def replay_delivery_endpoint(
+    finding_key: str,
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> FindingDetail:
+    """Requeue a dead-lettered delivery. Recorded against the row."""
+    _require_write_access(principal, x_tenant_id)
+    moved = await replay_delivery(
+        session,
+        tenant_id=x_tenant_id,
+        event_id=finding_key,
+        actor=principal.subject or "unknown",
+    )
+    if not moved:
+        raise ServiceError(
+            "NOT_REPLAYABLE",
+            "No dead-lettered delivery for this finding",
+            409,
+        )
+    return await load_finding(session, tenant_id=x_tenant_id, finding_key=finding_key)

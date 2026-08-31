@@ -856,6 +856,11 @@ class SiemOutbox(Base):
     )
     delivered_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Who put a dead letter back in the queue. Replay is an operator action on
+    # a security event that failed to reach the SOC; the row has to say who.
+    replayed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    replayed_by: Mapped[str | None] = mapped_column(String(320))
+
     __table_args__ = (
         UniqueConstraint("tenant_id", "event_id", "event_schema", name="uq_siem_outbox_event"),
     )

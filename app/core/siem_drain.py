@@ -152,7 +152,12 @@ async def drain_once(
 
 
 async def replay(
-    db: AsyncSession, *, tenant_id, event_id: str, now: dt.datetime | None = None
+    db: AsyncSession,
+    *,
+    tenant_id,
+    event_id: str,
+    actor: str | None = None,
+    now: dt.datetime | None = None,
 ) -> bool:
     """Put a dead letter back in the queue. Returns whether anything moved.
 
@@ -176,8 +181,12 @@ async def replay(
         row.attempts = 0
         row.next_attempt_at = now
         row.last_error = None
+        row.replayed_at = now
+        row.replayed_by = actor
 
-    logger.info("siem_drain.replay tenant=%s event=%s", tenant_id, event_id[:16])
+    logger.info(
+        "siem_drain.replay tenant=%s event=%s actor=%s", tenant_id, event_id[:16], actor
+    )
     return True
 
 
