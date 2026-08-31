@@ -125,6 +125,27 @@ def _parse_posture(raw: str | None) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _lock_rows(stmt, session: AsyncSession):
+    """Take the claimed rows out of reach of a second worker.
+
+    Two workers polling at the same interval will read the same batch and both
+    write their own id into `claimed_by` — the sessions then get analysed
+    twice, at double the model cost, and the loser's result overwrites the
+    winner's.
+
+    `FOR UPDATE SKIP LOCKED` makes the read itself exclusive: a concurrent
+    claimer skips the locked rows and takes the next ones instead of blocking.
+    SQLite has no row locks and no concurrent writers to protect against, so
+    the clause is omitted there rather than failing.
+    """
+    dialect = session.bind.dialect.name if session.bind is not None else ""
+    if dialect in ("postgresql", "oracle"):
+        return stmt.with_for_update(skip_locked=True)
+    if dialect == "mssql":
+        return stmt.with_for_update(skip_locked=True, of=AiSession)
+    return stmt
+
+
 @analysis_router.post("/claim", response_model=ClaimResponse)
 async def claim_sessions(
     payload: ClaimRequest,
@@ -144,17 +165,27 @@ async def claim_sessions(
 
     claimed: list[ClaimedSession] = []
     async with session.begin():
-        stmt = select(AiSession).where(AiSession.analysis_status == ready_status)
+        stmt = _lock_rows(
+            select(AiSession)
+            .where(AiSession.analysis_status == ready_status)
+            .order_by(AiSession.observed_at.asc()),
+            session,
+        )
         if payload.tenant_id is not None:
             stmt = stmt.where(AiSession.tenant_id == payload.tenant_id)
-        stmt = stmt.order_by(AiSession.observed_at.asc()).limit(payload.limit)
+        stmt = stmt.limit(payload.limit)
         rows = list((await session.execute(stmt)).scalars().all())
 
-        # Reclaim leases from workers that died mid-stage.
+        # Reclaim leases from workers that died mid-stage. Without this a
+        # crashed worker parks its batch in `*ing` forever and the sessions are
+        # never analysed — the failure nobody notices.
         if len(rows) < payload.limit:
-            stale = select(AiSession).where(
-                AiSession.analysis_status == claimed_status,
-                AiSession.claimed_at < lease_cutoff,
+            stale = _lock_rows(
+                select(AiSession).where(
+                    AiSession.analysis_status == claimed_status,
+                    AiSession.claimed_at < lease_cutoff,
+                ),
+                session,
             )
             if payload.tenant_id is not None:
                 stale = stale.where(AiSession.tenant_id == payload.tenant_id)
