@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import os
 import unittest
 from contextlib import contextmanager
 from typing import Iterator
+from unittest import mock
 
 from app.core.default_guardrail_llm import build_default_guardrail_llm_config
-from app.core.runtime_validation import validate_database_configuration
+from app.core.runtime_validation import (
+    _assert_production_required,
+    validate_database_configuration,
+)
 from app.core.settings import settings
 
 
@@ -19,6 +24,29 @@ def patched_settings(**overrides: object) -> Iterator[None]:
     finally:
         for name, value in original.items():
             setattr(settings, name, value)
+
+
+_PRODUCTION_OK_ENV = {
+    "UMAI_LICENSE_TOKEN": "fake-token",
+    "UMAI_LICENSE_PUBLIC_KEY": "fake-key",
+    "UMAI_LICENSE_PUBLIC_KEYS": "",
+}
+
+_PRODUCTION_OK_SETTINGS = dict(
+    database_url="postgresql+asyncpg://u:p@db/u",
+    ai_engine_base_url="http://umai-engine:9000",
+    cors_allow_origins=["https://app.example.com"],
+    extension_ingest_jwt_hs256_secret="ext-secret",
+    sensor_ingest_jwt_hs256_secret="sensor-secret",
+)
+
+
+def _run_assert(env_overrides: dict[str, str] | None = None) -> None:
+    env = dict(_PRODUCTION_OK_ENV)
+    if env_overrides:
+        env.update(env_overrides)
+    with mock.patch.dict(os.environ, env, clear=False):
+        _assert_production_required(production=True)
 
 
 class RuntimeValidationTests(unittest.TestCase):
@@ -54,6 +82,79 @@ class RuntimeValidationTests(unittest.TestCase):
         self.assertEqual(config["auth"]["type"], "header")
         self.assertEqual(config["auth"]["secret_env"], "AZURE_OPENAI_API_KEY")
         self.assertEqual(config["auth"]["header_name"], "api-key")
+
+
+class ProductionRequiredTests(unittest.TestCase):
+    def test_non_production_skips_all_checks(self) -> None:
+        with patched_settings(**{**_PRODUCTION_OK_SETTINGS, "database_url": None}):
+            # Missing DB does not raise outside production.
+            _assert_production_required(production=False)
+
+    def test_passes_with_all_required_set(self) -> None:
+        with patched_settings(**_PRODUCTION_OK_SETTINGS):
+            _run_assert()
+
+    def test_missing_database_url_raises(self) -> None:
+        with patched_settings(**{**_PRODUCTION_OK_SETTINGS, "database_url": None}):
+            with self.assertRaisesRegex(RuntimeError, "UMAI_DATABASE_URL"):
+                _run_assert()
+
+    def test_missing_ai_engine_url_raises(self) -> None:
+        with patched_settings(**{**_PRODUCTION_OK_SETTINGS, "ai_engine_base_url": None}):
+            with self.assertRaisesRegex(RuntimeError, "UMAI_AI_ENGINE_BASE_URL"):
+                _run_assert()
+
+    def test_missing_license_token_raises(self) -> None:
+        with patched_settings(**_PRODUCTION_OK_SETTINGS):
+            with self.assertRaisesRegex(RuntimeError, "UMAI_LICENSE_TOKEN"):
+                _run_assert({"UMAI_LICENSE_TOKEN": ""})
+
+    def test_missing_license_public_key_raises(self) -> None:
+        with patched_settings(**_PRODUCTION_OK_SETTINGS):
+            with self.assertRaisesRegex(RuntimeError, "UMAI_LICENSE_PUBLIC_KEY"):
+                _run_assert({"UMAI_LICENSE_PUBLIC_KEY": ""})
+
+    def test_public_keys_alternative_accepted(self) -> None:
+        with patched_settings(**_PRODUCTION_OK_SETTINGS):
+            _run_assert({"UMAI_LICENSE_PUBLIC_KEY": "", "UMAI_LICENSE_PUBLIC_KEYS": "k"})
+
+    def test_localhost_in_cors_raises(self) -> None:
+        with patched_settings(
+            **{
+                **_PRODUCTION_OK_SETTINGS,
+                "cors_allow_origins": ["https://app.example.com", "http://localhost:3000"],
+            }
+        ):
+            with self.assertRaisesRegex(RuntimeError, "localhost"):
+                _run_assert()
+
+    def test_loopback_ip_in_cors_raises(self) -> None:
+        with patched_settings(
+            **{
+                **_PRODUCTION_OK_SETTINGS,
+                "cors_allow_origins": ["http://127.0.0.1:3000"],
+            }
+        ):
+            with self.assertRaisesRegex(RuntimeError, "127.0.0.1"):
+                _run_assert()
+
+    def test_missing_extension_ingest_jwt_secret_raises(self) -> None:
+        with patched_settings(
+            **{**_PRODUCTION_OK_SETTINGS, "extension_ingest_jwt_hs256_secret": None}
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "UMAI_EXTENSION_INGEST_JWT_HS256_SECRET"
+            ):
+                _run_assert()
+
+    def test_missing_sensor_ingest_jwt_secret_raises(self) -> None:
+        with patched_settings(
+            **{**_PRODUCTION_OK_SETTINGS, "sensor_ingest_jwt_hs256_secret": None}
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "UMAI_SENSOR_INGEST_JWT_HS256_SECRET"
+            ):
+                _run_assert()
 
 
 if __name__ == "__main__":

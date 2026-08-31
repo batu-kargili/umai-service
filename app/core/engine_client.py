@@ -17,9 +17,16 @@ def _engine_url() -> str:
     return settings.ai_engine_base_url.rstrip("/") + "/internal/ai-engine/v1/evaluate"
 
 
+# Headroom added on top of the per-LLM-call budget: the engine may run several
+# policies sequentially and retry transient upstream rate-limits (HTTP 429),
+# so the service->engine HTTP timeout must be larger than a single call budget
+# or it will spuriously 504 while the engine is still legitimately working.
+_ENGINE_TIMEOUT_HEADROOM_S = 12.0
+
+
 async def evaluate_engine(request: EngineRequest) -> EngineResponse:
     url = _engine_url()
-    timeout_s = (request.timeout_ms or 1500) / 1000.0
+    timeout_s = (request.timeout_ms or 1500) / 1000.0 + _ENGINE_TIMEOUT_HEADROOM_S
     logger.info("engine.call.start request_id=%s url=%s", request.request_id, url)
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:

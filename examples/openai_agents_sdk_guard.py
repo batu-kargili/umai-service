@@ -9,30 +9,16 @@ from agents import Agent, Runner, ToolSearchTool, function_tool, tool_namespace
 
 from umai_agent_sdk import UmaiAgentClient, UmaiAgentIdentity, object_hash
 
-# Required:
-#   OPENAI_API_KEY
-#   UMAI_API_KEY
-#   UMAI_GUARDRAIL_ID
-#
-# First registration run:
-#   UMAI_AGENT_BOOTSTRAP_TOKEN=<token from Control Center/Admin API>
-#   UMAI_AGENT_ID=operations-assistant
-#
-# Later runs:
-#   UMAI_AGENT_PRIVATE_KEY_B64=<printed from first registration>
-#   UMAI_AGENT_DID=<returned by registration>
-#   UMAI_AGENT_PUBLIC_KEY_FINGERPRINT=<returned by registration>
-#   UMAI_TENANT_ID / UMAI_ENVIRONMENT_ID / UMAI_PROJECT_ID=<returned by registration>
-
-UMAI_SERVICE_URL = os.getenv("UMAI_SERVICE_URL", "http://127.0.0.1:8080")
-UMAI_GUARDRAIL_ID = os.environ["UMAI_GUARDRAIL_ID"]
-UMAI_API_KEY = os.environ["UMAI_API_KEY"]
-UMAI_AGENT_ID = os.getenv("UMAI_AGENT_ID", "operations-assistant")
+UMAI_SERVICE_URL = "https://pocttconsole.umaisolutions.com/"
+UMAI_GUARDRAIL_ID = "gr-tr-regulated-telecom-sovereign-shield"
+UMAI_API_KEY = "Qcq3NPss6LoFbJcUA0PmWU3SFEF7ypn8g8WStTH7-z8"
+UMAI_AGENT_ID = "openai-agents-quickstart"
 
 CURRENT_USER_PROMPT = "selam"
 RUN_ID = str(uuid.uuid4())
 UMAI_CLIENT: UmaiAgentClient | None = None
-
+if not os.getenv("OPENAI_API_KEY"):
+    raise SystemExit("Set OPENAI_API_KEY in the environment before running this example.")
 
 def build_identity() -> UmaiAgentIdentity:
     private_key = os.getenv("UMAI_AGENT_PRIVATE_KEY_B64")

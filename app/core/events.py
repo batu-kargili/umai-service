@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import uuid
 
@@ -60,7 +61,7 @@ async def record_audit_event(
     conversation_id = None
     redacted = False
     if request_payload is not None and settings.store_request_payloads:
-        request_payload_obj = request_payload.model_dump()
+        request_payload_obj = request_payload.model_dump(mode="json")
         if settings.audit_redaction_enabled:
             request_payload_obj, payload_changed = redact_payload(
                 request_payload_obj,
@@ -78,7 +79,7 @@ async def record_audit_event(
             )
             redacted = redacted or message_changed
         conversation_id = request_payload.conversation_id
-    response_payload_obj = engine_response.model_dump()
+    response_payload_obj = engine_response.model_dump(mode="json")
     if settings.audit_redaction_enabled:
         response_payload_obj, response_changed = redact_payload(
             response_payload_obj,
@@ -91,7 +92,7 @@ async def record_audit_event(
     triggering_policy_json = None
     triggering_policy_payload = None
     if engine_response.triggering_policy:
-        triggering_policy_obj = engine_response.triggering_policy.model_dump()
+        triggering_policy_obj = engine_response.triggering_policy.model_dump(mode="json")
         if settings.audit_redaction_enabled:
             triggering_policy_obj, policy_changed = redact_payload(
                 triggering_policy_obj,
@@ -203,8 +204,11 @@ async def record_audit_event(
                 )
             )
 
+    occurred_at = dt.datetime.now(dt.timezone.utc)
     siem_event = {
         "schema": "umai.guardrail.decision.v1",
+        "ts": occurred_at.timestamp(),
+        "occurred_at": occurred_at.isoformat(),
         "tenant_id": str(tenant_id),
         "environment_id": environment_id,
         "project_id": project_id,

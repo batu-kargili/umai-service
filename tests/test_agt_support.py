@@ -71,7 +71,13 @@ class AgtSupportTests(unittest.TestCase):
         self.assertIn("MEMORY_WRITE", template["phases"])
 
     def test_production_runtime_requires_explicit_admin_auth_mode(self) -> None:
-        with patched_environ(NODE_ENV="production"):
+        # Provide every other production-required value so the only thing
+        # validate_service_runtime() can fault on is admin_auth_mode.
+        with patched_environ(
+            NODE_ENV="production",
+            UMAI_LICENSE_TOKEN="fake-token",
+            UMAI_LICENSE_PUBLIC_KEY="fake-key",
+        ):
             with patched_settings(
                 database_url="oracle+oracledb_async://umai_app:password@db-host:1521/?service_name=FREEPDB1",
                 database_engine="oracle",
@@ -82,6 +88,9 @@ class AgtSupportTests(unittest.TestCase):
                 admin_auth_mode=None,
                 enforce_admin_jwt=False,
                 admin_jwt_hs256_secret=None,
+                cors_allow_origins=["https://app.example.com"],
+                extension_ingest_jwt_hs256_secret="ext-secret",
+                sensor_ingest_jwt_hs256_secret="sensor-secret",
             ):
                 with self.assertRaisesRegex(RuntimeError, "UMAI_ADMIN_AUTH_MODE"):
                     validate_service_runtime()

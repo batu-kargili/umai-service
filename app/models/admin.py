@@ -398,6 +398,33 @@ class AgenticGuardrailResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class PolicyDraftRequest(BaseModel):
+    tenant_id: uuid.UUID
+    environment_id: str
+    project_id: str
+    intent: str = ""
+    tailoring: str = ""
+    blocked_examples: list[str] = Field(default_factory=list)
+    allowed_examples: list[str] = Field(default_factory=list)
+
+
+class PolicyDraftPreview(BaseModel):
+    text: str
+    decision: Literal["BLOCK", "ALLOW"]
+
+
+class PolicyDraftResponse(BaseModel):
+    name: str
+    policy_id: str
+    type: Literal["CONTEXT_AWARE"] = "CONTEXT_AWARE"
+    phases: list[PolicyPhase]
+    summary: str
+    source_label: str = "AI safeguard draft"
+    rationale: list[str]
+    config: dict
+    preview_examples: list[PolicyDraftPreview]
+
+
 class GuardrailTestRequest(BaseModel):
     tenant_id: uuid.UUID
     environment_id: str

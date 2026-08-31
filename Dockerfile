@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11.11-slim-bookworm
 
 # ── OCI image labels ─────────────────────────────────────────────────────────
 LABEL org.opencontainers.image.title="UMAI Enterprise Service"

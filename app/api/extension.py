@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime as dt
 import hashlib
@@ -10,6 +11,7 @@ import time
 import uuid
 from collections import Counter
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, Query, Response
 from fastapi.responses import JSONResponse
@@ -23,6 +25,8 @@ from app.core.admin_auth import (
     get_admin_principal,
     require_admin_role,
 )
+from app.core.app_catalog import build_matcher
+from app.core.usage_sessions import fold_event_into_session
 from app.core.db import get_session, tenant_scope
 from app.core.engine_client import evaluate_engine
 from app.core.errors import ServiceError
@@ -32,6 +36,7 @@ from app.core.library import get_guardrail_template
 from app.core.license import license_allows_llm_calls, require_active_license
 from app.core.resolver import resolve_guardrail
 from app.core.settings import settings
+from app.core.siem import emit_event
 from app.models.engine import EngineFlags, EngineRequest, EngineResponse
 from app.models.db import BrowserExtensionEvent, Guardrail, GuardrailVersion
 from app.models.public import ChatMessage, InputArtifact, InputPayload, PublicGuardRequest
@@ -275,7 +280,14 @@ def _verify_hs256_jwt(
     *,
     audience: str,
     required_role: str,
+    expiry_leeway_seconds: int = 0,
 ) -> dict[str, Any]:
+    """Verify an HS256 token.
+
+    ``expiry_leeway_seconds`` lets a caller accept a recently expired token —
+    used only by the sensor renewal path, where a device that was powered off
+    over a weekend still needs to exchange its old token for a fresh one.
+    """
     parts = token.split(".")
     if len(parts) != 3:
         raise ServiceError("TOKEN_INVALID", "Malformed extension token", 401)
@@ -307,7 +319,7 @@ def _verify_hs256_jwt(
         raise ServiceError("TOKEN_INVALID", "Unsupported extension token algorithm", 401)
 
     exp = payload.get("exp")
-    if exp is not None and time.time() > float(exp):
+    if exp is not None and time.time() > float(exp) + expiry_leeway_seconds:
         raise ServiceError("TOKEN_EXPIRED", "Extension token has expired", 401)
 
     token_audience = payload.get("aud")
@@ -449,6 +461,16 @@ def _normalize_device_id(
     if header_device_id and header_device_id.strip() and header_device_id.strip() != device_id:
         raise ServiceError("FORBIDDEN", "X-Device-Id does not match event device_id", 403)
     return device_id
+
+
+def _host_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        hostname = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return hostname or None
 
 
 def _canonicalize(value: Any) -> Any:
@@ -700,6 +722,28 @@ def _risk_score_from_extension_payload(dlp: dict[str, Any]) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+# Decisions that represent an enforcement action worth surfacing to a SIEM.
+_SIEM_RELEVANT_DECISIONS = {"block", "warn", "redact", "justify", "flag"}
+
+
+def _is_security_relevant_extension_event(
+    *, decision: str | None, chain_is_valid: bool, dlp_tags: list[str]
+) -> bool:
+    """Forward only security-relevant extension telemetry to the SIEM.
+
+    Benign navigation/telemetry stays in the DB (queryable) but is not shipped,
+    to keep Splunk ingest volume and cost down. A broken hash chain is always
+    forwarded since it is itself a tamper signal.
+    """
+    if not chain_is_valid:
+        return True
+    if decision and decision.lower() in _SIEM_RELEVANT_DECISIONS:
+        return True
+    if dlp_tags:
+        return True
+    return False
 
 
 def _extension_action_from_engine(engine_response: EngineResponse) -> str:
@@ -1235,6 +1279,7 @@ async def ingest_extension_events(
     accepted = 0
     duplicates = 0
     chain_invalid = 0
+    siem_events: list[dict] = []
 
     async with session.begin():
         async with tenant_scope(session, str(principal.tenant_id)):
@@ -1247,6 +1292,8 @@ async def ingest_extension_events(
                 )
                 existing_ids = set(existing_result.scalars().all())
 
+            matcher = await build_matcher(session, principal.tenant_id)
+            session_memo: dict[tuple[str, str | None, str, str], Any] = {}
             last_hash_by_device: dict[str, str | None] = {}
 
             for envelope in payload.events:
@@ -1329,10 +1376,63 @@ async def ingest_extension_events(
                     response_len=_payload_int(payload_body, "response_len"),
                     payload_json=json.dumps(payload_body, separators=(",", ":"), ensure_ascii=True),
                 )
+                dlp_tags = _dlp_tags_from_extension_payload(payload_body.get("dlp"))
+                row.session_id = await fold_event_into_session(
+                    session,
+                    tenant_id=principal.tenant_id,
+                    matcher=matcher,
+                    batch_memo=session_memo,
+                    source="extension",
+                    event_type=envelope.event_type,
+                    host=_host_from_url(envelope.app.url) or envelope.app.site,
+                    port=None,
+                    process_name=None,
+                    user_email=envelope.user.user_email,
+                    user_idp_subject=envelope.user.user_idp_subject,
+                    device_id=device_id,
+                    captured_at=captured_at,
+                    dlp_hit=bool(dlp_tags),
+                )
                 session.add(row)
                 accepted += 1
                 existing_ids.add(envelope.event_id)
                 last_hash_by_device[device_id] = envelope.chain.event_hash
+
+                decision_value = _payload_string(payload_body, "decision")
+                if _is_security_relevant_extension_event(
+                    decision=decision_value,
+                    chain_is_valid=chain_is_valid,
+                    dlp_tags=dlp_tags,
+                ):
+                    siem_events.append(
+                        {
+                            "schema": "umai.extension.event.v1",
+                            "ts": captured_at.timestamp(),
+                            "occurred_at": captured_at.isoformat(),
+                            "tenant_id": str(principal.tenant_id),
+                            "event_id": envelope.event_id,
+                            "event_type": envelope.event_type,
+                            "site": envelope.app.site,
+                            "url": envelope.app.url,
+                            "user_email": envelope.user.user_email,
+                            "device_id": device_id,
+                            "decision": decision_value,
+                            "status": _payload_string(payload_body, "status"),
+                            "dlp_tags": dlp_tags,
+                            "risk_score": _risk_score_from_extension_payload(
+                                payload_body.get("dlp")
+                            ),
+                            "chain_valid": chain_is_valid,
+                            "chain_error": chain_error,
+                            "event_hash": envelope.chain.event_hash,
+                        }
+                    )
+
+    # Fire-and-forget after the DB transaction commits so the SIEM never sees an
+    # event the database rolled back. Demo-grade: a delivery failure is logged and
+    # dropped (see siem.py); the durable outbox is the planned hardening.
+    for siem_event in siem_events:
+        asyncio.create_task(emit_event(siem_event))
 
     return ExtensionEventIngestResponse(
         accepted=accepted,

@@ -90,16 +90,65 @@ def validate_database_configuration() -> tuple[str, str]:
     return configured_engine, drivername
 
 
-def validate_service_runtime() -> None:
-    """Check critical configuration at startup and emit warnings for missing settings.
+def _assert_production_required(production: bool) -> None:
+    """Refuse to start in production when any required secret or safe default is missing.
 
-    This is intentionally non-fatal: the service starts even without a database
-    URL so that health/readiness probes can respond while the operator fixes
-    configuration. Errors that would prevent *all* requests are surfaced through
-    the ``/readyz`` endpoint instead.
+    Development mode still degrades to warnings so health endpoints can respond
+    while the operator fixes the config; production must fail fast so an
+    insecure deployment never accepts traffic.
+    """
+    if not production:
+        return
+
+    if not settings.database_url:
+        raise RuntimeError("Production runtime requires UMAI_DATABASE_URL")
+
+    if not settings.ai_engine_base_url:
+        raise RuntimeError("Production runtime requires UMAI_AI_ENGINE_BASE_URL")
+
+    license_token = os.getenv("UMAI_LICENSE_TOKEN", "").strip()
+    license_public_key = os.getenv("UMAI_LICENSE_PUBLIC_KEY", "").strip()
+    license_public_keys = os.getenv("UMAI_LICENSE_PUBLIC_KEYS", "").strip()
+    if not license_token:
+        raise RuntimeError("Production runtime requires UMAI_LICENSE_TOKEN")
+    if not (license_public_key or license_public_keys):
+        raise RuntimeError(
+            "Production runtime requires UMAI_LICENSE_PUBLIC_KEY "
+            "(or UMAI_LICENSE_PUBLIC_KEYS)"
+        )
+
+    bad_origins = [
+        origin
+        for origin in settings.cors_allow_origins
+        if "localhost" in origin.lower() or "127.0.0.1" in origin
+    ]
+    if bad_origins:
+        raise RuntimeError(
+            "Production runtime cannot have localhost/127.0.0.1 in "
+            "UMAI_CORS_ALLOW_ORIGINS: " + ", ".join(bad_origins)
+        )
+
+    if not settings.extension_ingest_jwt_hs256_secret:
+        raise RuntimeError(
+            "Production runtime requires UMAI_EXTENSION_INGEST_JWT_HS256_SECRET"
+        )
+    if not settings.sensor_ingest_jwt_hs256_secret:
+        raise RuntimeError(
+            "Production runtime requires UMAI_SENSOR_INGEST_JWT_HS256_SECRET"
+        )
+
+
+def validate_service_runtime() -> None:
+    """Check critical configuration at startup.
+
+    In production (UMAI_ENVIRONMENT in {prod, production}) any missing required
+    secret or unsafe default raises immediately, blocking startup. In other
+    environments the same conditions degrade to warnings so health endpoints
+    can respond while the operator fixes the config.
     """
     warnings: list[str] = []
     production = _is_production()
+    _assert_production_required(production)
 
     if not settings.database_url:
         warnings.append(

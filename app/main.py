@@ -13,9 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.admin import router as admin_router
+from app.api.analysis import analysis_router
+from app.api.applications import applications_admin_router
 from app.api.extension import ext_admin_router, ext_router
 from app.api.ops import router as ops_router
 from app.api.public import router as public_router
+from app.api.sensor import sensor_admin_router, sensor_router
 from app.core.errors import ServiceError
 from app.core.license import bootstrap_license
 from app.core.logging import configure_logging, reset_request_id, set_request_id
@@ -59,6 +62,14 @@ def create_app() -> FastAPI:
     app.include_router(ext_router)
     # The extension admin router adds privileged controls for extension workflows.
     app.include_router(ext_admin_router)
+    # The endpoint sensor router handles managed-device telemetry and policy.
+    app.include_router(sensor_router)
+    # The sensor admin router exposes endpoint inventory and event search.
+    app.include_router(sensor_admin_router)
+    # The applications admin router serves the AI app registry and usage dashboard.
+    app.include_router(applications_admin_router)
+    # The analysis router serves the pull-based detection worker.
+    app.include_router(analysis_router)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):

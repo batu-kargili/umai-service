@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
@@ -23,6 +24,7 @@ from app.core.admin_auth import (
 from app.core.agent_mesh import hash_secret
 from app.core.eval_gate import resolve_publish_gate
 from app.core.agentic_builder import generate_agentic_guardrail
+from app.core.policy_drafter import generate_policy_draft
 from app.core.auth import hash_api_key
 from app.core.db import get_session, get_sessionmaker, tenant_scope
 from app.core.eval_sets import get_eval_set, list_eval_sets
@@ -44,6 +46,7 @@ from app.core.library import (
 from app.core.redis import get_redis
 from app.core.resolver import resolve_environment, resolve_guardrail, resolve_project
 from app.core.settings import settings
+from app.core.siem import emit_event
 from app.core.snapshots import build_snapshot_key, publish_snapshot
 from app.core.snapshot_signing import pack_snapshot_record, sign_snapshot
 from app.models import admin as admin_models
@@ -236,6 +239,59 @@ def _merge_snapshot_phases(
     if agt_config and agt_config.get("enabled"):
         phase_set.update(agt_config.get("enforced_phases", []) or [])
     return _normalize_phases(list(phase_set))
+
+
+async def _sync_engine_snapshot(version_row: GuardrailVersion) -> str:
+    """Ensure the engine can load a DB-backed guardrail version snapshot."""
+
+    try:
+        snapshot_payload = json.loads(version_row.snapshot_json)
+    except json.JSONDecodeError as exc:
+        raise ServiceError(
+            "INVALID_GUARDRAIL_SNAPSHOT",
+            "Guardrail snapshot JSON is invalid",
+            500,
+        ) from exc
+    if not isinstance(snapshot_payload, dict):
+        raise ServiceError(
+            "INVALID_GUARDRAIL_SNAPSHOT",
+            "Guardrail snapshot JSON must be an object",
+            500,
+        )
+
+    signature = version_row.signature
+    key_id = version_row.key_id
+    if not signature:
+        signature, key_id = sign_snapshot(snapshot_payload)
+        version_row.signature = signature
+        version_row.key_id = key_id
+
+    redis_key = build_snapshot_key(
+        str(version_row.tenant_id),
+        version_row.environment_id,
+        version_row.project_id,
+        version_row.guardrail_id,
+        version_row.version,
+    )
+    try:
+        redis = get_redis()
+    except RuntimeError as exc:
+        raise ServiceError("REDIS_UNAVAILABLE", str(exc), 503, True) from exc
+    await publish_snapshot(
+        redis,
+        redis_key,
+        pack_snapshot_record(snapshot_payload, signature, key_id),
+    )
+    logger.info(
+        "admin.guardrail_version.synced_to_engine tenant_id=%s env=%s project=%s guardrail_id=%s version=%s redis_key=%s",
+        version_row.tenant_id,
+        version_row.environment_id,
+        version_row.project_id,
+        version_row.guardrail_id,
+        version_row.version,
+        redis_key,
+    )
+    return redis_key
 
 
 def _coerce_bool(value: object) -> bool | None:
@@ -1345,6 +1401,26 @@ async def build_agentic_guardrail(
     return admin_models.AgenticGuardrailResponse(**plan)
 
 
+@router.post("/policies/draft", response_model=admin_models.PolicyDraftResponse)
+async def draft_policy(
+    payload: admin_models.PolicyDraftRequest,
+    session: AsyncSession = Depends(get_session),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> admin_models.PolicyDraftResponse:
+    _require_tenant_access(principal, payload.tenant_id)
+    async with session.begin():
+        async with tenant_scope(session, str(payload.tenant_id)):
+            await resolve_environment(
+                session, payload.tenant_id, payload.environment_id
+            )
+            await resolve_project(
+                session, payload.tenant_id, payload.environment_id, payload.project_id
+            )
+
+    draft = await generate_policy_draft(payload.model_dump())
+    return admin_models.PolicyDraftResponse(**draft)
+
+
 @router.post("/test/guard", response_model=admin_models.GuardrailTestResponse)
 async def test_guardrail(
     payload: admin_models.GuardrailTestRequest,
@@ -1388,6 +1464,7 @@ async def test_guardrail(
                     "Guardrail version not found",
                     404,
                 )
+            await _sync_engine_snapshot(version_row)
     timestamp = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
     engine_request = EngineRequest(
         request_id=request_id,
@@ -1697,7 +1774,7 @@ async def _run_evaluation_background(
                 guardrail_version=guardrail_version,
                 phase=phase,
                 input=input_payload,
-                timeout_ms=1500,
+                timeout_ms=settings.evaluation_timeout_ms,
                 flags=EngineFlags(allow_llm_calls=allow_llm_calls),
             )
 
@@ -2475,6 +2552,26 @@ async def publish_guardrail_version(
         payload.project_id,
         guardrail_id,
         version,
+    )
+    published_at = dt.datetime.now(dt.timezone.utc)
+    asyncio.create_task(
+        emit_event(
+            {
+                "schema": "umai.admin.publish.v1",
+                "ts": published_at.timestamp(),
+                "occurred_at": published_at.isoformat(),
+                "tenant_id": str(payload.tenant_id),
+                "environment_id": payload.environment_id,
+                "project_id": payload.project_id,
+                "guardrail_id": guardrail_id,
+                "guardrail_version": version,
+                "actor_id": principal.subject,
+                "approver_id": payload.approver_id,
+                "break_glass": bool(payload.break_glass_reason),
+                "break_glass_reason": payload.break_glass_reason,
+                "key_id": key_id,
+            }
+        )
     )
     return admin_models.PublishResponse(redis_key=key, signature=signature, key_id=key_id)
 

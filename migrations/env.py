@@ -47,6 +47,33 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def ensure_version_table_width(connection) -> None:
+    """Widen ``alembic_version.version_num`` before Alembic writes to it.
+
+    Alembic creates that column as ``VARCHAR(32)``. One revision id in this
+    repo — ``0014_endpoint_sensor_download_sessions`` — is 38 characters, so
+    recording it fails on any engine that enforces column length. SQLite does
+    not, which is why the chain appears healthy there and breaks the first time
+    it runs against PostgreSQL.
+
+    Renaming the revision would be the smaller change, but any database that
+    already recorded the long id would then look un-migrated, so the column is
+    widened instead. Idempotent, and a no-op on engines that do not enforce
+    the limit.
+    """
+    dialect = connection.dialect.name
+
+    if dialect == "postgresql":
+        connection.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS alembic_version ("
+            "version_num VARCHAR(128) NOT NULL, "
+            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+        )
+        connection.exec_driver_sql(
+            "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(128)"
+        )
+
+
 def do_run_migrations(connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
@@ -60,6 +87,14 @@ async def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+
+    # Widen the version table on its own transaction, before Alembic opens the
+    # migration connection. Running DDL on the migration connection first puts
+    # it in an implicit transaction, which turns Alembic's own
+    # ``begin_transaction()`` into a no-op — migrations then appear to succeed
+    # and silently roll back.
+    async with connectable.begin() as connection:
+        await connection.run_sync(ensure_version_table_width)
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

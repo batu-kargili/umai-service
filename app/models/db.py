@@ -144,7 +144,7 @@ class AuditEvent(Base):
     guardrail_version: Mapped[int] = mapped_column(Integer, nullable=False)
     request_id: Mapped[str] = mapped_column(String(64), nullable=False)
     phase: Mapped[str] = mapped_column(String(16), nullable=False)
-    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
     allowed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     category: Mapped[str | None] = mapped_column(String(32))
     decision_severity: Mapped[str | None] = mapped_column(String(16))
@@ -200,10 +200,163 @@ class BrowserExtensionEvent(Base):
     response_hash: Mapped[str | None] = mapped_column(String(64))
     prompt_len: Mapped[int | None] = mapped_column(Integer)
     response_len: Mapped[int | None] = mapped_column(Integer)
+    session_id: Mapped[str | None] = mapped_column(String(36))
     payload_json: Mapped[str] = mapped_column(UnicodeText, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
     )
+
+
+class AiApplication(Base):
+    __tablename__ = "ai_applications"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    vendor: Mapped[str | None] = mapped_column(String(200))
+    category: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'other'"))
+    risk_level: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'none'"))
+    icon_key: Mapped[str | None] = mapped_column(String(64))
+    domains_json: Mapped[str] = mapped_column(UnicodeText, nullable=False, default="[]")
+    process_names_json: Mapped[str] = mapped_column(UnicodeText, nullable=False, default="[]")
+    ports_json: Mapped[str] = mapped_column(UnicodeText, nullable=False, default="[]")
+    app_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'web'"))
+    is_sanctioned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_training: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    sensor_capture: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    inventory_only: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    path_hint: Mapped[str | None] = mapped_column(String(128))
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    source: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'builtin'"))
+    is_customized: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AiUsageSession(Base):
+    __tablename__ = "ai_usage_sessions"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    app_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    app_slug: Mapped[str | None] = mapped_column(String(64))
+    user_key: Mapped[str] = mapped_column(String(320), nullable=False)
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    session_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_activity_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    dlp_hit_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class EndpointSensorEvent(Base):
+    __tablename__ = "endpoint_sensor_events"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
+    event_id: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    process_name: Mapped[str | None] = mapped_column(String(260))
+    process_path: Mapped[str | None] = mapped_column(UnicodeText)
+    parent_process: Mapped[str | None] = mapped_column(String(260))
+    destination_host: Mapped[str | None] = mapped_column(String(255))
+    destination_sni: Mapped[str | None] = mapped_column(String(255))
+    destination_port: Mapped[int | None] = mapped_column(Integer)
+    user_email: Mapped[str | None] = mapped_column(String(320))
+    user_idp_subject: Mapped[str | None] = mapped_column(String(128))
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    prev_event_hash: Mapped[str | None] = mapped_column(String(64))
+    event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    chain_valid: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    chain_error: Mapped[str | None] = mapped_column(UnicodeText)
+    decision: Mapped[str | None] = mapped_column(String(32))
+    message: Mapped[str | None] = mapped_column(UnicodeText)
+    prompt_hash: Mapped[str | None] = mapped_column(String(64))
+    prompt_len: Mapped[int | None] = mapped_column(Integer)
+    dlp_tags_json: Mapped[str | None] = mapped_column(UnicodeText)
+    file_context_json: Mapped[str | None] = mapped_column(UnicodeText)
+    session_id: Mapped[str | None] = mapped_column(String(36))
+    payload_json: Mapped[str] = mapped_column(UnicodeText, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class EndpointSensorDevice(Base):
+    __tablename__ = "endpoint_sensor_devices"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
+    device_id: Mapped[str] = mapped_column(String(128), primary_key=True, nullable=False)
+    hostname: Mapped[str | None] = mapped_column(String(255))
+    os: Mapped[str | None] = mapped_column(String(64))
+    os_version: Mapped[str | None] = mapped_column(String(128))
+    agent_version: Mapped[str | None] = mapped_column(String(64))
+    last_heartbeat_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_policy_etag: Mapped[str | None] = mapped_column(String(128))
+    last_user_email: Mapped[str | None] = mapped_column(String(320))
+    identity_status: Mapped[str | None] = mapped_column(String(64))
+    queue_depth: Mapped[int | None] = mapped_column(Integer)
+    last_successful_upload_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[str | None] = mapped_column(UnicodeText)
+    enrolled_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'active'"))
+
+
+class EndpointSensorBootstrapToken(Base):
+    __tablename__ = "endpoint_sensor_bootstrap_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    device_id: Mapped[str | None] = mapped_column(String(128))
+    subject: Mapped[str | None] = mapped_column(String(256))
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class EndpointSensorDownloadSession(Base):
+    __tablename__ = "endpoint_sensor_download_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    employee_idp_subject: Mapped[str] = mapped_column(String(256), nullable=False)
+    employee_upn: Mapped[str | None] = mapped_column(String(320))
+    employee_display_name: Mapped[str | None] = mapped_column(String(200))
+    created_ip: Mapped[str | None] = mapped_column(String(64))
+    installer_version: Mapped[str | None] = mapped_column(String(64))
+    bootstrap_token_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    bootstrap_token_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    artifact_id: Mapped[str | None] = mapped_column(String(128))
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64))
+    artifact_filename: Mapped[str | None] = mapped_column(String(260))
+    artifact_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    downloaded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    device_id: Mapped[str | None] = mapped_column(String(128))
+    first_heartbeat_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_heartbeat_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    first_event_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    identity_status: Mapped[str | None] = mapped_column(String(64))
+    failure_reason: Mapped[str | None] = mapped_column(UnicodeText)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'requested'"))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class EvidencePack(Base):
@@ -510,3 +663,113 @@ class EvaluationCase(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
     )
+
+
+class AiSession(Base):
+    """A single agent conversation, normalized across collection channels.
+
+    This is the *analysis* unit. `umai.ai_event.v1` (RFC-1) stays the query unit
+    and is derived from these rows — a detector reasons over a transcript, not
+    over one event at a time.
+
+    The transcript itself lives in the blob store; `transcript_ref` points at it.
+    """
+
+    __tablename__ = "ai_sessions"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
+    # sha256("{source}|{source_session_id}|{raw_log_path}") — sub-agent runs share
+    # their parent's session id in separate files, so the id alone is not unique.
+    session_key: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_session_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    raw_log_path: Mapped[str | None] = mapped_column(UnicodeText)
+
+    actor_user: Mapped[str | None] = mapped_column(String(320))
+    actor_device_id: Mapped[str | None] = mapped_column(String(128))
+    hostname: Mapped[str | None] = mapped_column(String(255))
+    username: Mapped[str | None] = mapped_column(String(255))
+
+    model: Mapped[str | None] = mapped_column(String(128))
+    project_path: Mapped[str | None] = mapped_column(UnicodeText)
+    title: Mapped[str | None] = mapped_column(UnicodeText)
+
+    observed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ingested_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    tool_call_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+
+    # Session configuration: permission mode, connected MCP servers, granted
+    # permissions. Drives detection without reading a single message.
+    posture_json: Mapped[str | None] = mapped_column(UnicodeText)
+
+    transcript_ref: Mapped[str] = mapped_column(UnicodeText, nullable=False)
+    transcript_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    transcript_bytes: Mapped[int | None] = mapped_column(Integer)
+
+    collector_name: Mapped[str | None] = mapped_column(String(64))
+    collector_version: Mapped[str | None] = mapped_column(String(32))
+
+    analysis_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=text("'ingested'")
+    )
+    threat_tactic: Mapped[str | None] = mapped_column(String(64))
+    verdict: Mapped[str | None] = mapped_column(String(24))
+    confidence: Mapped[float | None] = mapped_column(Float)
+    analyzed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    # Lease held by an analysis worker while a stage is in flight. A worker that
+    # dies mid-stage leaves a stale lease, which the claim query reclaims.
+    claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_by: Mapped[str | None] = mapped_column(String(64))
+
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class Finding(Base):
+    """A security finding raised against an agent session.
+
+    Findings are idempotent per (session, rule): re-evaluating a session
+    produces the same `finding_key`, so an ingest replay updates rather than
+    duplicates.
+    """
+
+    __tablename__ = "findings"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
+    # sha256("{session_key}|{rule_id}")
+    finding_key: Mapped[str] = mapped_column(String(64), primary_key=True, nullable=False)
+
+    session_key: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    rule_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    technique_id: Mapped[str | None] = mapped_column(String(16))
+    technique_name: Mapped[str | None] = mapped_column(String(128))
+    tactic: Mapped[str | None] = mapped_column(String(64))
+
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(UnicodeText, nullable=False)
+    summary: Mapped[str | None] = mapped_column(UnicodeText)
+    evidence_json: Mapped[str | None] = mapped_column(UnicodeText)
+
+    # Denormalized from the session so SIEM export and the console list do not
+    # need a join for the fields they always show.
+    source: Mapped[str | None] = mapped_column(String(32))
+    actor_user: Mapped[str | None] = mapped_column(String(320))
+    actor_device_id: Mapped[str | None] = mapped_column(String(128))
+    project_path: Mapped[str | None] = mapped_column(UnicodeText)
+    observed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    detector: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'open'")
+    )
+    detected_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+    emitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
