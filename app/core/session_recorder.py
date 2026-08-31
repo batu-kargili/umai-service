@@ -21,10 +21,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import finding_schema
-from app.core.finding_events import build_finding_event
+from app.core.findings import upsert_finding
 from app.core.posture_rules import evaluate_posture, finding_key
 from app.core.transcript_store import get_transcript_store
-from app.models.db import AiSession, Finding
+from app.models.db import AiSession
 
 
 @dataclass
@@ -220,14 +220,6 @@ async def _record_posture_findings(
     events: list[dict[str, Any]] = []
     for finding in raised:
         key = finding_key(session_key, finding.rule_id)
-        existing = (
-            await db.execute(
-                select(Finding).where(
-                    Finding.tenant_id == tenant_id,
-                    Finding.finding_key == key,
-                )
-            )
-        ).scalar_one_or_none()
 
         attributes = {
             "session_key": session_key,
@@ -250,14 +242,12 @@ async def _record_posture_findings(
             "detector": finding_schema.DETECTOR_POSTURE,
         }
 
-        if existing is None:
-            db.add(Finding(tenant_id=tenant_id, finding_key=key, status="open", **attributes))
+        created, event = await upsert_finding(
+            db, tenant_id=tenant_id, finding_key=key, attributes=attributes
+        )
+        if created:
             recorded += 1
-            events.append(
-                build_finding_event(tenant_id=tenant_id, finding_key=key, **attributes)
-            )
-        else:
-            for attribute, value in attributes.items():
-                setattr(existing, attribute, value)
+        if event is not None:
+            events.append(event)
 
     return recorded, events

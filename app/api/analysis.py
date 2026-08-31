@@ -26,12 +26,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import finding_schema
 from app.core.db import get_session, tenant_scope
 from app.core.errors import ServiceError
-from app.core.finding_events import build_finding_event
+from app.core.findings import upsert_finding
 from app.core.posture_rules import finding_key
 from app.core.settings import settings
 from app.core.siem import emit_event
 from app.core.transcript_store import get_transcript_store
-from app.models.db import AiSession, Finding
+from app.models.db import AiSession
 
 logger = logging.getLogger("umai.service.analysis")
 
@@ -286,15 +286,6 @@ async def _raise_analysis_finding(
     rule_id = f"detector.{payload.threat_tactic or 'unspecified'}"
     key = finding_key(row.session_key, rule_id)
 
-    existing = (
-        await session.execute(
-            select(Finding).where(
-                Finding.tenant_id == row.tenant_id,
-                Finding.finding_key == key,
-            )
-        )
-    ).scalar_one_or_none()
-
     attributes = {
         "session_key": row.session_key,
         "rule_id": rule_id,
@@ -325,10 +316,7 @@ async def _raise_analysis_finding(
         "detector": finding_schema.DETECTOR_REASONING,
     }
 
-    if existing is not None:
-        for attribute, value in attributes.items():
-            setattr(existing, attribute, value)
-        return False, []
-
-    session.add(Finding(tenant_id=row.tenant_id, finding_key=key, status="open", **attributes))
-    return True, [build_finding_event(tenant_id=row.tenant_id, finding_key=key, **attributes)]
+    created, event = await upsert_finding(
+        session, tenant_id=row.tenant_id, finding_key=key, attributes=attributes
+    )
+    return created, [event] if event is not None else []
