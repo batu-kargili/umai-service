@@ -291,6 +291,137 @@ async def load_finding(
     return detail
 
 
+# --- lifecycle --------------------------------------------------------------
+
+
+class TransitionRequest(_BaseModel):
+    to_status: str
+    note: str | None = None
+
+
+class AssignRequest(_BaseModel):
+    # Explicit null clears the assignment.
+    assignee: str | None = None
+
+
+def _require_write_access(principal: AdminPrincipal, tenant_id: uuid.UUID) -> None:
+    from app.api.admin import _require_tenant_access
+
+    _require_tenant_access(principal, tenant_id, required_role="tenant-admin")
+
+
+async def _get_for_update(
+    session: AsyncSession, tenant_id: uuid.UUID, finding_key: str
+) -> Finding:
+    row = await session.get(Finding, (tenant_id, finding_key))
+    if row is None:
+        raise ServiceError("NOT_FOUND", "Finding not found", 404)
+    return row
+
+
+async def transition_finding(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    finding_key: str,
+    to_status: str,
+    actor: str,
+    note: str | None = None,
+) -> FindingDetail:
+    """Move a finding through its lifecycle, recording who and why.
+
+    The audit row is written in the same transaction as the status change, so
+    the trail cannot end up missing a step that actually happened.
+    """
+    _validate("status", to_status, finding_schema.STATUSES)
+
+    async with session.begin():
+        async with tenant_scope(session, str(tenant_id)):
+            row = await _get_for_update(session, tenant_id, finding_key)
+            from_status = row.status
+
+            if to_status == from_status:
+                raise ServiceError(
+                    "INVALID_REQUEST",
+                    f"Finding is already {to_status}",
+                    409,
+                )
+
+            allowed = finding_schema.allowed_transitions(from_status)
+            if to_status not in allowed:
+                raise ServiceError(
+                    "INVALID_TRANSITION",
+                    f"Cannot move a finding from {from_status} to {to_status}. "
+                    f"Allowed: {sorted(allowed)}.",
+                    409,
+                )
+
+            if finding_schema.transition_requires_note(from_status, to_status) and not (
+                note or ""
+            ).strip():
+                raise ServiceError(
+                    "NOTE_REQUIRED",
+                    f"Moving from {from_status} to {to_status} requires a note",
+                    422,
+                )
+
+            row.status = to_status
+            session.add(
+                FindingStatusEvent(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant_id,
+                    finding_key=finding_key,
+                    from_status=from_status,
+                    to_status=to_status,
+                    actor=actor,
+                    note=(note or None),
+                    # Set here, not left to the column default: CURRENT_TIMESTAMP
+                    # is second-granular on SQLite, so two transitions a second
+                    # apart would share a timestamp and the trail would lose its
+                    # order. An operator can easily click twice in one second.
+                    occurred_at=dt.datetime.now(dt.timezone.utc),
+                )
+            )
+
+    logger.info(
+        "finding.transition tenant=%s finding=%s %s->%s actor=%s",
+        tenant_id,
+        finding_key[:12],
+        from_status,
+        to_status,
+        actor,
+    )
+    return await load_finding(session, tenant_id=tenant_id, finding_key=finding_key)
+
+
+async def assign_finding(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    finding_key: str,
+    assignee: str | None,
+    actor: str,
+) -> FindingDetail:
+    """Put the finding on someone's plate, or take it off.
+
+    Assignment is not a status change and is not audited in the status trail:
+    it says who is looking, not what was decided.
+    """
+    async with session.begin():
+        async with tenant_scope(session, str(tenant_id)):
+            row = await _get_for_update(session, tenant_id, finding_key)
+            row.assignee = (assignee or None)
+
+    logger.info(
+        "finding.assign tenant=%s finding=%s assignee=%s actor=%s",
+        tenant_id,
+        finding_key[:12],
+        assignee,
+        actor,
+    )
+    return await load_finding(session, tenant_id=tenant_id, finding_key=finding_key)
+
+
 # --- HTTP surface -----------------------------------------------------------
 # Thin wrappers: auth, then delegate. Keeping the query logic in plain
 # functions above is what lets it be tested without HTTP.
@@ -344,3 +475,44 @@ async def get_finding_endpoint(
 ) -> FindingDetail:
     _require_read_access(principal, x_tenant_id)
     return await load_finding(session, tenant_id=x_tenant_id, finding_key=finding_key)
+
+
+@findings_admin_router.post(
+    "/findings/{finding_key}/status", response_model=FindingDetail
+)
+async def transition_finding_endpoint(
+    finding_key: str,
+    payload: TransitionRequest,
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> FindingDetail:
+    _require_write_access(principal, x_tenant_id)
+    return await transition_finding(
+        session,
+        tenant_id=x_tenant_id,
+        finding_key=finding_key,
+        to_status=payload.to_status,
+        actor=principal.subject or "unknown",
+        note=payload.note,
+    )
+
+
+@findings_admin_router.post(
+    "/findings/{finding_key}/assignee", response_model=FindingDetail
+)
+async def assign_finding_endpoint(
+    finding_key: str,
+    payload: AssignRequest,
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> FindingDetail:
+    _require_write_access(principal, x_tenant_id)
+    return await assign_finding(
+        session,
+        tenant_id=x_tenant_id,
+        finding_key=finding_key,
+        assignee=payload.assignee,
+        actor=principal.subject or "unknown",
+    )

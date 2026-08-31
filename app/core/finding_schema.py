@@ -80,6 +80,45 @@ STATUSES_REQUIRING_NOTE: Final[frozenset[str]] = frozenset(
     {STATUS_FALSE_POSITIVE, STATUS_ACCEPTED_RISK}
 )
 
+# A decision has been recorded. Reaching one of these closes the finding.
+TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
+    {STATUS_RESOLVED, STATUS_FALSE_POSITIVE, STATUS_ACCEPTED_RISK}
+)
+
+# Where a finding may go from where it is.
+#
+# `resolved` is only reachable through `investigating`: saying a finding was
+# dealt with without recording that anyone looked at it is the shape of a
+# queue that gets cleared rather than worked. Dismissing outright
+# (`false_positive`, `accepted_risk`) is allowed directly, because both
+# already demand a written reason.
+#
+# Every terminal state leads back to `open` and nowhere else — reopening is
+# how a closed finding re-enters the queue, not a shortcut between verdicts.
+_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
+    STATUS_OPEN: frozenset({STATUS_INVESTIGATING, STATUS_FALSE_POSITIVE, STATUS_ACCEPTED_RISK}),
+    STATUS_INVESTIGATING: frozenset(
+        {STATUS_RESOLVED, STATUS_FALSE_POSITIVE, STATUS_ACCEPTED_RISK}
+    ),
+    STATUS_RESOLVED: frozenset({STATUS_OPEN}),
+    STATUS_FALSE_POSITIVE: frozenset({STATUS_OPEN}),
+    STATUS_ACCEPTED_RISK: frozenset({STATUS_OPEN}),
+}
+
+
+def allowed_transitions(from_status: str) -> frozenset[str]:
+    return _TRANSITIONS.get(from_status, frozenset())
+
+
+def transition_requires_note(from_status: str, to_status: str) -> bool:
+    """Whether this move has to be explained.
+
+    Two cases: asserting a judgement (`false_positive`, `accepted_risk`), and
+    undoing one (leaving a terminal state). Both are the moments a reader
+    months later will want a reason for.
+    """
+    return to_status in STATUSES_REQUIRING_NOTE or from_status in TERMINAL_STATUSES
+
 # Rule id -> category, for producers that do not classify their own finding.
 # Only rules that exist today are listed; anything else falls back to `other`.
 _RULE_CATEGORIES: Final[dict[str, str]] = {
