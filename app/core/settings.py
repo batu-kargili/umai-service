@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     siem_endpoints_json: str | None = None
     siem_max_retries: int = 3
     siem_timeout_seconds: float = 3.0
+    # Outbox drain. Off by default so an operator opts in deliberately;
+    # enqueueing happens regardless, so nothing is lost while it is off.
+    siem_drain_enabled: bool = False
+    siem_drain_interval_seconds: float = 5.0
     async_job_webhook_timeout_seconds: float = 5.0
     admin_jwt_hs256_secret: str | None = None
     enforce_admin_jwt: bool = False

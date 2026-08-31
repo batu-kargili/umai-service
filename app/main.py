@@ -4,7 +4,8 @@ This module assembles the FastAPI application, including startup hooks,
 middleware, routers, and service-level error handling.
 """
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 import logging
 import uuid
 
@@ -18,6 +19,8 @@ from app.api.applications import applications_admin_router
 from app.api.extension import ext_admin_router, ext_router
 from app.api.findings import findings_admin_router
 from app.api.ops import router as ops_router
+from app.core.db import get_sessionmaker
+from app.core.siem_drain import run_drain_loop
 from app.api.public import router as public_router
 from app.api.sensor import sensor_admin_router, sensor_router
 from app.core.errors import ServiceError
@@ -34,7 +37,31 @@ async def lifespan(_app: FastAPI):
     """Run startup checks before the service begins accepting requests."""
     validate_service_runtime()
     await bootstrap_license()
-    yield
+
+    # The outbox is written whether or not this runs; the drain is what makes
+    # queued findings actually reach the SIEM. Started here so a single
+    # process delivers them — see UMA-121 for the multi-replica question.
+    drain_task = None
+    stop_drain = asyncio.Event()
+    if settings.siem_drain_enabled:
+        drain_task = asyncio.create_task(
+            run_drain_loop(
+                get_sessionmaker(),
+                interval_s=settings.siem_drain_interval_seconds,
+                stop=stop_drain,
+            )
+        )
+        logger.info("siem_drain.started interval=%s", settings.siem_drain_interval_seconds)
+
+    try:
+        yield
+    finally:
+        if drain_task is not None:
+            stop_drain.set()
+            drain_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await drain_task
+            logger.info("siem_drain.stopped")
 
 
 def create_app() -> FastAPI:
