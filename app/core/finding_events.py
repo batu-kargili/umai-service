@@ -29,12 +29,16 @@ def build_finding_event(
     title: str,
     summary: str | None,
     evidence_json: str | None,
-    source: str | None,
+    source: str,
+    category: str,
     actor_user: str | None,
     actor_device_id: str | None,
     project_path: str | None,
     observed_at: dt.datetime | None,
     detector: str,
+    status: str = "open",
+    assignee: str | None = None,
+    remediation_json: str | None = None,
 ) -> dict[str, Any]:
     """Build the SIEM event for one finding."""
     try:
@@ -55,6 +59,10 @@ def build_finding_event(
         "event_type": rule_id,
         "severity": severity,
         "detector": detector,
+        # The axes a SOC filters the queue on. `source` below is the channel
+        # (adr, extension, sdk, red_team, policy), not the AI tool.
+        "category": category,
+        "status": status,
         # Identity and device: the LEEF encoder reads these key names directly.
         "user_email": actor_user,
         "device_id": actor_device_id,

@@ -1,0 +1,123 @@
+"""Canonical value sets for findings, and derivation of the ones a producer omits.
+
+Single source for the vocabulary frozen in
+``docs/contracts/finding-and-worker-result-schema.md`` (platform repo, UMA-40).
+Both finding producers — the posture path in ``session_recorder`` and the
+reasoning path in ``api.analysis`` — read the sets from here so the queue cannot
+drift into two vocabularies.
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+# Which channel produced the finding. This is the axis the operator queue is
+# filtered on. It is NOT the AI tool: `claude`, `cursor` and friends live on
+# `ai_sessions.source` and are reached through `Finding.session_key`.
+SOURCE_ADR: Final = "adr"
+SOURCE_EXTENSION: Final = "extension"
+SOURCE_SDK: Final = "sdk"
+SOURCE_RED_TEAM: Final = "red_team"
+SOURCE_POLICY: Final = "policy"
+
+SOURCES: Final[frozenset[str]] = frozenset(
+    {SOURCE_ADR, SOURCE_EXTENSION, SOURCE_SDK, SOURCE_RED_TEAM, SOURCE_POLICY}
+)
+
+# Which detector fired inside that channel.
+DETECTOR_POSTURE: Final = "posture"
+DETECTOR_TRIAGE: Final = "triage"
+DETECTOR_REASONING: Final = "reasoning"
+DETECTOR_RED_TEAM: Final = "red_team"
+DETECTOR_POLICY: Final = "policy"
+
+DETECTORS: Final[frozenset[str]] = frozenset(
+    {DETECTOR_POSTURE, DETECTOR_TRIAGE, DETECTOR_REASONING, DETECTOR_RED_TEAM, DETECTOR_POLICY}
+)
+
+# Operator-facing grouping. Closed set: widening it is a contract change.
+CATEGORY_DATA_EXPOSURE: Final = "data_exposure"
+CATEGORY_CREDENTIAL_EXPOSURE: Final = "credential_exposure"
+CATEGORY_PROMPT_INJECTION: Final = "prompt_injection"
+CATEGORY_UNSAFE_TOOL_USE: Final = "unsafe_tool_use"
+CATEGORY_POLICY_EVASION: Final = "policy_evasion"
+CATEGORY_SHADOW_AI: Final = "shadow_ai"
+CATEGORY_AGENT_MISBEHAVIOR: Final = "agent_misbehavior"
+CATEGORY_OTHER: Final = "other"
+
+CATEGORIES: Final[frozenset[str]] = frozenset(
+    {
+        CATEGORY_DATA_EXPOSURE,
+        CATEGORY_CREDENTIAL_EXPOSURE,
+        CATEGORY_PROMPT_INJECTION,
+        CATEGORY_UNSAFE_TOOL_USE,
+        CATEGORY_POLICY_EVASION,
+        CATEGORY_SHADOW_AI,
+        CATEGORY_AGENT_MISBEHAVIOR,
+        CATEGORY_OTHER,
+    }
+)
+
+# Lifecycle. Transitions are enforced at the API layer (UMA-46), not here.
+STATUS_OPEN: Final = "open"
+STATUS_INVESTIGATING: Final = "investigating"
+STATUS_RESOLVED: Final = "resolved"
+STATUS_FALSE_POSITIVE: Final = "false_positive"
+STATUS_ACCEPTED_RISK: Final = "accepted_risk"
+
+STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        STATUS_OPEN,
+        STATUS_INVESTIGATING,
+        STATUS_RESOLVED,
+        STATUS_FALSE_POSITIVE,
+        STATUS_ACCEPTED_RISK,
+    }
+)
+
+# Transitions that assert a judgement and therefore require a note.
+STATUSES_REQUIRING_NOTE: Final[frozenset[str]] = frozenset(
+    {STATUS_FALSE_POSITIVE, STATUS_ACCEPTED_RISK}
+)
+
+# Rule id -> category, for producers that do not classify their own finding.
+# Only rules that exist today are listed; anything else falls back to `other`.
+_RULE_CATEGORIES: Final[dict[str, str]] = {
+    # An agent that ran with permission checks bypassed had more capability
+    # than the policy grants — that is excessive permission, not evasion by
+    # the user.
+    "posture.bypass_permissions": CATEGORY_UNSAFE_TOOL_USE,
+    "posture.browser_checks_skipped": CATEGORY_UNSAFE_TOOL_USE,
+    # An MCP server nobody approved is an unsanctioned capability reaching the
+    # agent, which is the shadow-AI problem in tool form.
+    "posture.unapproved_mcp_server": CATEGORY_SHADOW_AI,
+}
+
+
+def derive_category(rule_id: str | None) -> str:
+    """Best category for a producer that did not supply one.
+
+    Returns ``other`` when the rule is unknown. That is a deliberate debt
+    marker rather than a guess: a queue filling up with ``other`` means the
+    detectors are not classifying their own output, which is a defect to fix
+    at the detector, not to paper over here.
+
+    The reasoning path currently lands here for every finding, because its
+    rule ids are built from the ADR tactic at runtime (``detector.<tactic>``)
+    and cannot be enumerated. That path starts sending an explicit category
+    with the worker-result contract (UMA-51).
+    """
+    if not rule_id:
+        return CATEGORY_OTHER
+    return _RULE_CATEGORIES.get(rule_id, CATEGORY_OTHER)
+
+
+def normalize_category(category: str | None, rule_id: str | None = None) -> str:
+    """Accept a producer-supplied category, or derive one.
+
+    An unrecognised value is not passed through: it would silently widen a
+    closed set and make queue filters lie.
+    """
+    if category and category in CATEGORIES:
+        return category
+    return derive_category(rule_id)

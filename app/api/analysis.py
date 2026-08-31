@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import finding_schema
 from app.core.db import get_session, tenant_scope
 from app.core.errors import ServiceError
 from app.core.finding_events import build_finding_event
@@ -313,12 +314,15 @@ async def _raise_analysis_finding(
             },
             ensure_ascii=False,
         ),
-        "source": row.source,
+        # The channel, not the AI tool. `row.source` holds the tool
+        # (`claude`, `cursor`, …) and stays reachable through `session_key`.
+        "source": finding_schema.SOURCE_ADR,
+        "category": finding_schema.derive_category(rule_id),
         "actor_user": row.actor_user,
         "actor_device_id": row.actor_device_id,
         "project_path": row.project_path,
         "observed_at": row.observed_at,
-        "detector": "adr",
+        "detector": finding_schema.DETECTOR_REASONING,
     }
 
     if existing is not None:

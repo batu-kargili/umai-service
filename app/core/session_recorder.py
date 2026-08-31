@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import finding_schema
 from app.core.finding_events import build_finding_event
 from app.core.posture_rules import evaluate_posture, finding_key
 from app.core.transcript_store import get_transcript_store
@@ -238,12 +239,15 @@ async def _record_posture_findings(
             "title": finding.title,
             "summary": finding.summary,
             "evidence_json": finding.evidence_json(),
-            "source": values.get("source"),
+            # The channel, not the AI tool. `values["source"]` holds the tool
+            # (`claude`, `cursor`, …) and stays reachable through `session_key`.
+            "source": finding_schema.SOURCE_ADR,
+            "category": finding_schema.derive_category(finding.rule_id),
             "actor_user": values.get("actor_user"),
             "actor_device_id": values.get("actor_device_id"),
             "project_path": values.get("project_path"),
             "observed_at": values.get("observed_at"),
-            "detector": "posture",
+            "detector": finding_schema.DETECTOR_POSTURE,
         }
 
         if existing is None:

@@ -757,19 +757,58 @@ class Finding(Base):
     summary: Mapped[str | None] = mapped_column(UnicodeText)
     evidence_json: Mapped[str | None] = mapped_column(UnicodeText)
 
-    # Denormalized from the session so SIEM export and the console list do not
-    # need a join for the fields they always show.
-    source: Mapped[str | None] = mapped_column(String(32))
+    # The axis the queue is filtered on: which channel produced this finding.
+    # `adr` | `extension` | `sdk` | `red_team` | `policy`. Not the AI tool —
+    # that lives on the session and is reached through `session_key`.
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Operator-facing grouping. See the category set in the frozen contract.
+    category: Mapped[str] = mapped_column(String(48), nullable=False)
+
     actor_user: Mapped[str | None] = mapped_column(String(320))
     actor_device_id: Mapped[str | None] = mapped_column(String(128))
     project_path: Mapped[str | None] = mapped_column(UnicodeText)
     observed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Which detector fired: `posture` | `triage` | `reasoning` | `red_team` | `policy`.
     detector: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'open'")
     )
+    assignee: Mapped[str | None] = mapped_column(String(320))
+    # Proposed action or a reference to a draft policy change.
+    remediation_json: Mapped[str | None] = mapped_column(UnicodeText)
     detected_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
     )
     emitted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class FindingStatusEvent(Base):
+    """One audited transition in a finding's lifecycle.
+
+    Deliberately not folded into `audit_events`: that table is shaped for
+    guardrail decisions and makes `environment_id`, `project_id`,
+    `guardrail_id`, `guardrail_version`, `phase`, `action` and `allowed`
+    NOT NULL. A finding transition has no counterpart for any of them, and
+    filling them with placeholders would corrupt the audit trail this exists
+    to protect.
+    """
+
+    __tablename__ = "finding_status_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    finding_key: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Empty on the row that records the finding being opened.
+    from_status: Mapped[str | None] = mapped_column(String(16))
+    to_status: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    actor: Mapped[str] = mapped_column(String(320), nullable=False)
+    # Required on the transitions that assert a judgement: `false_positive`
+    # and `accepted_risk`. Enforced at the API layer, not by the schema.
+    note: Mapped[str | None] = mapped_column(UnicodeText)
+
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
