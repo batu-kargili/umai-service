@@ -80,7 +80,19 @@ class ResultRequest(_BaseModel):
     session_key: str
     stage: str
     verdict: str
+
+    # ADR threat framework. `technique_id` has its own field: the worker used
+    # to ship it inside `threat_tactic`, which left the tactic column holding
+    # technique ids and the technique columns empty.
+    technique_id: str | None = None
+    technique_name: str | None = None
     threat_tactic: str | None = None
+
+    # Optional classification from the detector. Absent values are derived
+    # (see `core.finding_schema`), never guessed at the call site.
+    severity: str | None = None
+    category: str | None = None
+
     confidence: float | None = None
     reason: str | None = None
     model: str | None = None
@@ -275,6 +287,21 @@ async def record_analysis_result(
     )
 
 
+def _finding_title(payload: ResultRequest) -> str:
+    """Name the finding after what was actually detected.
+
+    A queue where every row reads "classified as malicious" cannot be
+    triaged by reading it.
+    """
+    if payload.technique_name:
+        return payload.technique_name
+    if payload.technique_id:
+        return f"Agent session matched {payload.technique_id}"
+    if payload.threat_tactic:
+        return f"Agent session classified as malicious ({payload.threat_tactic})"
+    return "Agent session classified as malicious by the reasoning stage"
+
+
 async def _raise_analysis_finding(
     session: AsyncSession,
     *,
@@ -283,21 +310,32 @@ async def _raise_analysis_finding(
     now: dt.datetime,
 ) -> tuple[bool, list[dict[str, Any]]]:
     """Record the finding produced by the reasoning stage."""
-    rule_id = f"detector.{payload.threat_tactic or 'unspecified'}"
+    # The technique is the most specific thing the detector knows, so it keys
+    # the rule when present; the tactic is the fallback.
+    discriminator = payload.technique_id or payload.threat_tactic or "unspecified"
+    rule_id = f"detector.{discriminator}"
     key = finding_key(row.session_key, rule_id)
+
+    severity, severity_basis = finding_schema.derive_severity(
+        payload.severity, payload.confidence
+    )
 
     attributes = {
         "session_key": row.session_key,
         "rule_id": rule_id,
-        "technique_id": None,
-        "technique_name": None,
+        "technique_id": payload.technique_id,
+        "technique_name": payload.technique_name,
+        # Only the tactic. A technique id landing here is the bug this
+        # contract exists to close.
         "tactic": payload.threat_tactic,
-        "severity": "high",
-        "title": "Agent session classified as malicious by the reasoning stage",
+        "severity": severity,
+        "title": _finding_title(payload),
         "summary": payload.reason,
         "evidence_json": json.dumps(
             {
                 "confidence": payload.confidence,
+                # Answers "why is this high?" without re-running the analysis.
+                "severity_basis": severity_basis,
                 "model": payload.model,
                 "input_tokens": payload.input_tokens,
                 "output_tokens": payload.output_tokens,
@@ -308,7 +346,7 @@ async def _raise_analysis_finding(
         # The channel, not the AI tool. `row.source` holds the tool
         # (`claude`, `cursor`, …) and stays reachable through `session_key`.
         "source": finding_schema.SOURCE_ADR,
-        "category": finding_schema.derive_category(rule_id),
+        "category": finding_schema.normalize_category(payload.category, rule_id),
         "actor_user": row.actor_user,
         "actor_device_id": row.actor_device_id,
         "project_path": row.project_path,

@@ -112,6 +112,45 @@ def derive_category(rule_id: str | None) -> str:
     return _RULE_CATEGORIES.get(rule_id, CATEGORY_OTHER)
 
 
+SEVERITY_CRITICAL: Final = "critical"
+SEVERITY_HIGH: Final = "high"
+SEVERITY_MEDIUM: Final = "medium"
+SEVERITY_LOW: Final = "low"
+
+SEVERITIES: Final[frozenset[str]] = frozenset(
+    {SEVERITY_CRITICAL, SEVERITY_HIGH, SEVERITY_MEDIUM, SEVERITY_LOW}
+)
+
+
+def derive_severity(
+    supplied: str | None, confidence: float | None
+) -> tuple[str, str]:
+    """Severity for a finding, plus how it was arrived at.
+
+    Order per the contract: what the detector declared, then the confidence it
+    reported. ``critical`` is never derived — it only ever comes from a rule
+    that says so, because an automatic path to the top of the scale makes the
+    top of the scale meaningless.
+
+    The basis is returned so it can be recorded alongside the finding. An
+    operator asking "why is this high?" deserves an answer better than the
+    number itself.
+    """
+    if supplied and supplied in SEVERITIES:
+        return supplied, "detector"
+
+    if confidence is None:
+        # Nothing to reason from. Medium rather than high: an unexplained
+        # finding should not outrank one a detector actually rated.
+        return SEVERITY_MEDIUM, "default"
+
+    if confidence >= 0.90:
+        return SEVERITY_HIGH, "confidence"
+    if confidence >= 0.70:
+        return SEVERITY_MEDIUM, "confidence"
+    return SEVERITY_LOW, "confidence"
+
+
 def normalize_category(category: str | None, rule_id: str | None = None) -> str:
     """Accept a producer-supplied category, or derive one.
 
