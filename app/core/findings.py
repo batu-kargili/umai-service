@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.finding_events import build_finding_event
+from app.core.siem_outbox import enqueue_event
 from app.models.db import Finding
 
 # Columns a producer must never overwrite on re-analysis: they belong to the
@@ -72,9 +73,12 @@ async def upsert_finding(
         _apply(existing, attributes)
         return False, None
 
-    return True, build_finding_event(
-        tenant_id=tenant_id, finding_key=finding_key, **attributes
-    )
+    event = build_finding_event(tenant_id=tenant_id, finding_key=finding_key, **attributes)
+    # Queued in this transaction, not posted after it. A crash between commit
+    # and send used to lose the finding silently; now the row is either
+    # committed with the finding or rolled back with it.
+    await enqueue_event(db, tenant_id=tenant_id, event=event)
+    return True, event
 
 
 async def _load(db: AsyncSession, tenant_id: Any, finding_key: str) -> Finding | None:

@@ -10,7 +10,6 @@ token, not a user session.
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import hmac
 import json
@@ -29,7 +28,6 @@ from app.core.errors import ServiceError
 from app.core.findings import upsert_finding
 from app.core.posture_rules import finding_key
 from app.core.settings import settings
-from app.core.siem import emit_event
 from app.core.transcript_store import get_transcript_store
 from app.models.db import AiSession
 
@@ -268,9 +266,6 @@ async def record_analysis_result(
                     session, row=row, payload=payload, now=now
                 )
                 siem_events.extend(events)
-
-    for event in siem_events:
-        asyncio.create_task(emit_event(event))
 
     logger.info(
         "analysis.result stage=%s session=%s verdict=%s tactic=%s",

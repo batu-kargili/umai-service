@@ -2357,11 +2357,8 @@ async def ingest_agent_sessions(
                 sessions=sessions,
             )
 
-    # Fire-and-forget after the DB transaction commits so the SIEM never sees a
-    # finding the database rolled back. Same posture as the extension path: a
-    # delivery failure is logged and dropped; a durable outbox is the hardening.
-    for finding_event in result.siem_events:
-        asyncio.create_task(emit_event(finding_event))
+    # Deliveries were queued inside the ingest transaction (see
+    # `core.siem_outbox`); the drain worker posts them. Nothing is sent here.
 
     logger.info(
         "sensor.sessions.ingested tenant=%s device=%s created=%s updated=%s unchanged=%s findings=%s rejected=%s",

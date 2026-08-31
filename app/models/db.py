@@ -3,7 +3,17 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, UnicodeText, Uuid, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    UnicodeText,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -811,4 +821,41 @@ class FindingStatusEvent(Base):
 
     occurred_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+
+class SiemOutbox(Base):
+    """A SIEM delivery waiting to happen, or a record that it did.
+
+    Written in the same transaction as the event it describes. Fire-and-forget
+    delivery loses security findings to a QRadar restart or a network blip and
+    tells nobody; this makes the loss impossible and the failure visible.
+    """
+
+    __tablename__ = "siem_outbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+
+    # The producer's id for this event — a finding key today. With the schema
+    # it forms the uniqueness that makes enqueueing idempotent.
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_schema: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[str] = mapped_column(UnicodeText, nullable=False)
+
+    # `pending` | `delivered` | `dead_letter`
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'pending'")
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    last_error: Mapped[str | None] = mapped_column(UnicodeText)
+    next_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+    delivered_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "event_id", "event_schema", name="uq_siem_outbox_event"),
     )
