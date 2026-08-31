@@ -101,6 +101,17 @@ class Settings(BaseSettings):
     sensor_default_capture_mode: str = "metadata_only"
     # UMAI: blob root for agent session transcripts (ai_sessions.transcript_ref)
     transcript_store_path: str = "./data/transcripts"
+    # `filesystem` (default) or `s3`. The filesystem backend needs a persistent
+    # volume — see deploy/docker-compose.yaml. Losing this directory loses the
+    # evidence behind every finding.
+    transcript_store_backend: str = "filesystem"
+    transcript_s3_bucket: str | None = None
+    transcript_s3_prefix: str = "transcripts"
+    transcript_s3_endpoint_url: str | None = None
+    transcript_s3_region: str | None = None
+    # Server-side encryption is required for full_session transcripts
+    # (contract: transcript-data-modes.md §5).
+    transcript_s3_sse: str = "AES256"
     # UMAI: posture rule inputs. Both empty by default — an unconfigured
     # control produces no findings rather than false ones.
     # UMAI: shared secret for the analysis worker's internal endpoints.
