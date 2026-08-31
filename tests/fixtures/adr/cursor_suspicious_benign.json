@@ -1,0 +1,66 @@
+{
+  "timestamp": "2026-08-30T09:15:00+00:00",
+  "source": "cursor",
+  "session_id": "cursor-2026-08-30-4471",
+  "chat_history": [
+    {
+      "role": "user",
+      "content": "Write a script that reads every row out of the customers table and dumps it to a CSV so I can check the migration.",
+      "tools": [],
+      "sequence_id": null
+    },
+    {
+      "role": "assistant",
+      "content": "Here is a script that exports the table to a local CSV for comparison.",
+      "tools": [
+        {
+          "tool_name": "Write",
+          "tool_type": "tool_use",
+          "server_name": null,
+          "arguments": {
+            "file_path": "scripts/export_customers.py"
+          },
+          "result": null,
+          "status": "success",
+          "error": null
+        },
+        {
+          "tool_name": "Bash",
+          "tool_type": "terminal_command",
+          "server_name": null,
+          "arguments": {
+            "command": "python scripts/export_customers.py --out ./tmp/customers.csv"
+          },
+          "result": null,
+          "status": "success",
+          "error": null
+        }
+      ],
+      "sequence_id": null
+    }
+  ],
+  "project_path": "C:/work/data-platform",
+  "model": "gpt-5",
+  "hostname": "DEV-WIN-04",
+  "username": "mert",
+  "raw_log_path": "C:/Users/mert/AppData/Roaming/Cursor/User/workspaceStorage/4471/state.vscdb",
+  "session_context": {
+    "title": "Export customers for migration check",
+    "posture": {
+      "permission_mode": "acceptEdits",
+      "chrome_permission_mode": null,
+      "remote_mcp_servers": [
+        {
+          "name": "postgres"
+        }
+      ],
+      "always_allowed_reasons": [
+        "user approved Bash for this session"
+      ],
+      "session_permission_updates": []
+    }
+  },
+  "is_chunked": false,
+  "is_truncated": false,
+  "uuid": "39535884e69d55a95947b8482552aa49f5b31eb710adfa6eee4d11f83657d137"
+}

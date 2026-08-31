@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-08-30T09:15:00+00:00",
+  "source": "claude",
+  "session_id": "c7f2a1e0-3b44-4d90-9a11-5e6f70bc2d31",
+  "chat_history": [
+    {
+      "role": "user",
+      "content": "The invoice totals are off by a cent on multi-currency orders. Can you find it?",
+      "tools": [],
+      "sequence_id": null
+    },
+    {
+      "role": "assistant",
+      "content": "Looking at the rounding in the currency conversion.",
+      "tools": [
+        {
+          "tool_name": "Read",
+          "tool_type": "tool_use",
+          "server_name": null,
+          "arguments": {
+            "file_path": "src/billing/convert.py"
+          },
+          "result": null,
+          "status": "success",
+          "error": null
+        }
+      ],
+      "sequence_id": null
+    },
+    {
+      "role": "assistant",
+      "content": "`convert.py:47` rounds each line item before summing. Summing first and rounding once fixes the cent.",
+      "tools": [],
+      "sequence_id": null
+    }
+  ],
+  "project_path": "/Users/ada/work/billing-api",
+  "model": "claude-opus-5",
+  "hostname": "ADA-MBP",
+  "username": "ada",
+  "raw_log_path": "/Users/ada/.claude/projects/billing-api/c7f2a1e0.jsonl",
+  "session_context": {
+    "title": "Fix invoice rounding",
+    "posture": {
+      "permission_mode": "default",
+      "chrome_permission_mode": null,
+      "remote_mcp_servers": [
+        {
+          "name": "filesystem"
+        }
+      ],
+      "always_allowed_reasons": [],
+      "session_permission_updates": []
+    }
+  },
+  "is_chunked": false,
+  "is_truncated": false,
+  "uuid": "0427e4968100c0390fe3a22d1bc78e150397518f2e2ce8e36a4ef9710d76b107"
+}
