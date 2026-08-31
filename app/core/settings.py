@@ -112,6 +112,15 @@ class Settings(BaseSettings):
     # Server-side encryption is required for full_session transcripts
     # (contract: transcript-data-modes.md §5).
     transcript_s3_sse: str = "AES256"
+    # UMAI: base64 of a 32-byte key. Set it and filesystem transcripts are
+    # written AES-256-GCM encrypted; leave it unset and they are written in
+    # the clear, which is only defensible when the volume itself is encrypted.
+    # Blobs already on disk stay readable either way — the format is tagged.
+    transcript_encryption_key: str | None = None
+    # UMAI: retention sweep. Off by default so an upgrade never deletes
+    # evidence a customer did not agree to lose.
+    transcript_retention_enabled: bool = False
+    transcript_retention_interval_seconds: float = 60 * 60
     # UMAI: posture rule inputs. Both empty by default — an unconfigured
     # control produces no findings rather than false ones.
     # UMAI: shared secret for the analysis worker's internal endpoints.

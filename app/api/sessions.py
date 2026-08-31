@@ -18,8 +18,8 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Query
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Body, Depends, Header, Query
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,11 +28,20 @@ from app.core.admin_auth import (
     AdminPrincipal,
     ensure_tenant_access,
     get_admin_principal,
+    require_admin_role,
     require_any_admin_role,
 )
 from app.core.db import get_session, tenant_scope
 from app.core.errors import ServiceError
-from app.core.transcript_store import get_transcript_store
+from app.core.transcript_retention import (
+    ACTION_READ,
+    delete_transcript,
+    record_audit_event,
+)
+from app.core.transcript_store import (
+    TranscriptDecryptionError,
+    get_transcript_store,
+)
 from app.models.db import AiSession, Finding, Tenant
 
 logger = logging.getLogger("umai.service.sessions")
@@ -94,6 +103,17 @@ class TranscriptResponse(_BaseModel):
     session_key: str
     collection_mode: str
     transcript: dict[str, Any]
+
+
+class DeleteTranscriptRequest(_BaseModel):
+    # Required. Deleting evidence on request is a decision someone has to own,
+    # and a reason is the only part of it a reader months later can use.
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class DeleteTranscriptResponse(_BaseModel):
+    session_key: str
+    deleted: bool
 
 
 async def _tenant_mode(session: AsyncSession, tenant_id: uuid.UUID) -> str:
@@ -293,6 +313,10 @@ async def load_transcript(
 
     try:
         payload = await get_transcript_store().get(transcript_ref)
+    except TranscriptDecryptionError as exc:
+        # The evidence is on disk and the deployment is misconfigured. Calling
+        # that "expired" would quietly lose it.
+        raise ServiceError("TRANSCRIPT_UNREADABLE", str(exc), 500) from exc
     except (OSError, ValueError, KeyError) as exc:
         # Retention removed it, or the blob store lost it. Either way the
         # finding survives without its evidence body.
@@ -302,7 +326,17 @@ async def load_transcript(
             410,
         ) from exc
 
-    # Audited because it is content: who read whose session, and when.
+    # Audited because it is content: who read whose session, and when. The row
+    # is what makes the claim checkable; the log line is for operations.
+    async with session.begin():
+        record_audit_event(
+            session,
+            tenant_id=tenant_id,
+            session_key=session_key,
+            action=ACTION_READ,
+            actor=actor,
+            transcript_bytes=len(payload),
+        )
     logger.info(
         "transcript.read tenant=%s session=%s actor=%s bytes=%s",
         tenant_id,
@@ -316,6 +350,30 @@ async def load_transcript(
         collection_mode=mode,
         transcript=json.loads(payload),
     )
+
+
+async def remove_transcript(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    session_key: str,
+    actor: str,
+    reason: str,
+) -> DeleteTranscriptResponse:
+    """Delete the stored transcript for one session, on request.
+
+    Idempotent: a session whose transcript is already gone reports
+    ``deleted=False`` rather than failing, so a retried request from a data
+    subject workflow does not look like an error.
+    """
+    deleted = await delete_transcript(
+        session,
+        tenant_id=tenant_id,
+        session_key=session_key,
+        actor=actor,
+        reason=reason,
+    )
+    return DeleteTranscriptResponse(session_key=session_key, deleted=deleted)
 
 
 # --- HTTP surface -----------------------------------------------------------
@@ -378,4 +436,28 @@ async def get_transcript_endpoint(
         tenant_id=x_tenant_id,
         session_key=session_key,
         actor=principal.subject or "unknown",
+    )
+
+
+@sessions_admin_router.delete(
+    "/sessions/{session_key}/transcript", response_model=DeleteTranscriptResponse
+)
+async def delete_transcript_endpoint(
+    session_key: str,
+    body: DeleteTranscriptRequest = Body(...),
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> DeleteTranscriptResponse:
+    # Deletion is destructive and outward-facing in the sense that matters
+    # here: the evidence behind a finding stops existing. Auditor is not
+    # enough.
+    ensure_tenant_access(principal, x_tenant_id)
+    require_admin_role(principal, "tenant-admin")
+    return await remove_transcript(
+        session,
+        tenant_id=x_tenant_id,
+        session_key=session_key,
+        actor=principal.subject or "unknown",
+        reason=body.reason,
     )

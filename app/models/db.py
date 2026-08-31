@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
+    Index,
     Integer,
     String,
     UnicodeText,
@@ -33,6 +34,11 @@ class Tenant(Base):
     # `posture_only` | `metadata` | `full_session`.
     collection_mode: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'metadata'")
+    )
+    # Transcripts age out separately from the sessions and findings that point
+    # at them. Retention is a contractual term, so it lives per tenant.
+    transcript_retention_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("30")
     )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
@@ -870,4 +876,32 @@ class SiemOutbox(Base):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "event_id", "event_schema", name="uq_siem_outbox_event"),
+    )
+
+
+class TranscriptAuditEvent(Base):
+    """Who touched conversation content, and why.
+
+    Covers reads as well as deletions. Read-only collection does not make this
+    low-sensitivity data: these are employees' own words and customers' data,
+    and the product claims access to them is audited.
+    """
+
+    __tablename__ = "transcript_audit_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    session_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Null for the retention sweep: nobody asked, the clock did.
+    actor: Mapped[str | None] = mapped_column(String(256))
+    reason: Mapped[str | None] = mapped_column(UnicodeText)
+    transcript_bytes: Mapped[int | None] = mapped_column(Integer)
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_transcript_audit_session", "tenant_id", "session_key", "occurred_at"),
+        Index("ix_transcript_audit_recent", "tenant_id", "occurred_at"),
     )

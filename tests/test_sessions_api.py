@@ -20,7 +20,9 @@ from app.core import finding_schema
 from app.core.admin_auth import AdminPrincipal
 from app.core.errors import ServiceError
 from app.core.transcript_store import get_transcript_store, reset_transcript_store
-from app.models.db import AiSession, Finding, Tenant
+from sqlalchemy import select
+
+from app.models.db import AiSession, Finding, Tenant, TranscriptAuditEvent
 from tests.conftest import db_session
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -386,6 +388,46 @@ class TestTranscript:
             _run(body)
         rendered = [r.getMessage() for r in caplog.records]
         assert any("transcript.read" in m and "ada@corp" in m for m in rendered)
+
+    def test_reading_content_leaves_a_queryable_audit_row(self) -> None:
+        """A log line is not something anyone can query months later."""
+
+        async def body():
+            ref = await _store_transcript()
+            async with db_session() as db:
+                await _tenant(db, TENANT, finding_schema.MODE_FULL_SESSION)
+                await _session(db, transcript_ref=ref)
+                await db.commit()
+                await load_transcript(
+                    db, tenant_id=TENANT, session_key="sess-1", actor="ada@corp"
+                )
+                return list(
+                    (await db.execute(select(TranscriptAuditEvent))).scalars().all()
+                )
+
+        events = _run(body)
+        assert len(events) == 1
+        assert (events[0].action, events[0].actor) == ("read", "ada@corp")
+        assert events[0].session_key == "sess-1"
+
+    def test_a_refused_read_leaves_no_audit_row(self) -> None:
+        """Nothing was disclosed, so nothing is recorded as disclosed."""
+
+        async def body():
+            ref = await _store_transcript()
+            async with db_session() as db:
+                await _tenant(db, TENANT, finding_schema.MODE_METADATA)
+                await _session(db, transcript_ref=ref)
+                await db.commit()
+                with pytest.raises(ServiceError):
+                    await load_transcript(
+                        db, tenant_id=TENANT, session_key="sess-1", actor="ada"
+                    )
+                return list(
+                    (await db.execute(select(TranscriptAuditEvent))).scalars().all()
+                )
+
+        assert _run(body) == []
 
 
 class TestAccessControl:

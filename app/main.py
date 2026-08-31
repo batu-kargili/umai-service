@@ -22,6 +22,7 @@ from app.api.sessions import sessions_admin_router
 from app.api.ops import router as ops_router
 from app.core.db import get_sessionmaker
 from app.core.siem_drain import run_drain_loop
+from app.core.transcript_retention import run_retention_loop
 from app.api.public import router as public_router
 from app.api.sensor import sensor_admin_router, sensor_router
 from app.core.errors import ServiceError
@@ -54,6 +55,23 @@ async def lifespan(_app: FastAPI):
         )
         logger.info("siem_drain.started interval=%s", settings.siem_drain_interval_seconds)
 
+    # Retention sweep. Off unless explicitly enabled: an upgrade must never be
+    # the reason a customer loses evidence.
+    retention_task = None
+    stop_retention = asyncio.Event()
+    if settings.transcript_retention_enabled:
+        retention_task = asyncio.create_task(
+            run_retention_loop(
+                get_sessionmaker(),
+                interval_s=settings.transcript_retention_interval_seconds,
+                stop=stop_retention,
+            )
+        )
+        logger.info(
+            "transcript_retention.started interval=%s",
+            settings.transcript_retention_interval_seconds,
+        )
+
     try:
         yield
     finally:
@@ -63,6 +81,12 @@ async def lifespan(_app: FastAPI):
             with suppress(asyncio.CancelledError):
                 await drain_task
             logger.info("siem_drain.stopped")
+        if retention_task is not None:
+            stop_retention.set()
+            retention_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await retention_task
+            logger.info("transcript_retention.stopped")
 
 
 def create_app() -> FastAPI:

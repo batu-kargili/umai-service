@@ -16,6 +16,8 @@ unchanged transcript resolves to the same reference and rewrites nothing.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import gzip
 import hashlib
 import os
@@ -31,6 +33,85 @@ def transcript_sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+# Written at the head of every encrypted blob. Its purpose is to make the two
+# formats tell themselves apart: turning encryption on must not orphan the
+# transcripts already on disk, and turning it off must not hide them.
+# The trailing NUL keeps it from colliding with the start of any plausible
+# gzip or JSON payload.
+_ENVELOPE_MAGIC = b"UMAI1\x00"
+_NONCE_BYTES = 12
+
+
+class TranscriptDecryptionError(RuntimeError):
+    """A blob is encrypted and the configured key cannot open it.
+
+    Distinct from a missing blob: the evidence is there and the deployment is
+    misconfigured. Treating it as "expired" would quietly lose evidence.
+    """
+
+
+def _encryption_key() -> bytes | None:
+    """The configured AES-256 key, or None when encryption is off."""
+    configured = (settings.transcript_encryption_key or "").strip()
+    if not configured:
+        return None
+    try:
+        key = base64.b64decode(configured, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RuntimeError(
+            "UMAI_TRANSCRIPT_ENCRYPTION_KEY must be base64. "
+            "Generate one with: python -c \"import os,base64;"
+            "print(base64.b64encode(os.urandom(32)).decode())\""
+        ) from exc
+    if len(key) != 32:
+        raise RuntimeError(
+            f"UMAI_TRANSCRIPT_ENCRYPTION_KEY must decode to 32 bytes, got {len(key)}."
+        )
+    return key
+
+
+def seal(payload: bytes) -> bytes:
+    """Encrypt if a key is configured, otherwise pass the bytes through."""
+    key = _encryption_key()
+    if key is None:
+        return payload
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: PLC0415
+
+    nonce = os.urandom(_NONCE_BYTES)
+    return _ENVELOPE_MAGIC + nonce + AESGCM(key).encrypt(nonce, payload, None)
+
+
+def unseal(blob: bytes) -> bytes:
+    """Decrypt a sealed blob; return an unsealed one unchanged.
+
+    Reading is driven by what is on disk, not by what is configured. A blob
+    written before encryption was enabled stays readable, and a key that is
+    removed while encrypted blobs exist produces a clear error rather than
+    garbage.
+    """
+    if not blob.startswith(_ENVELOPE_MAGIC):
+        return blob
+
+    key = _encryption_key()
+    if key is None:
+        raise TranscriptDecryptionError(
+            "This transcript is encrypted but UMAI_TRANSCRIPT_ENCRYPTION_KEY is not set."
+        )
+
+    from cryptography.exceptions import InvalidTag  # noqa: PLC0415
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: PLC0415
+
+    header = len(_ENVELOPE_MAGIC)
+    nonce = blob[header : header + _NONCE_BYTES]
+    try:
+        return AESGCM(key).decrypt(nonce, blob[header + _NONCE_BYTES :], None)
+    except InvalidTag as exc:
+        raise TranscriptDecryptionError(
+            "This transcript could not be decrypted with the configured key. "
+            "It was written with a different one."
+        ) from exc
+
+
 class TranscriptStore(Protocol):
     """Blob storage for session transcripts."""
 
@@ -39,6 +120,9 @@ class TranscriptStore(Protocol):
 
     async def get(self, ref: str) -> bytes:
         """Retrieve a transcript by reference."""
+
+    async def delete(self, ref: str) -> bool:
+        """Remove a transcript. Returns whether anything was there to remove."""
 
 
 class FilesystemTranscriptStore:
@@ -69,7 +153,8 @@ class FilesystemTranscriptStore:
             return ref, sha, target.stat().st_size
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        compressed = gzip.compress(payload)
+        # Compress first, then encrypt: ciphertext does not compress.
+        compressed = seal(gzip.compress(payload))
 
         # Write to a temporary name and rename, so a crash mid-write cannot
         # leave a truncated blob behind a valid-looking reference.
@@ -93,10 +178,24 @@ class FilesystemTranscriptStore:
     async def get(self, ref: str) -> bytes:
         path = self.root / ref
         # Reject references that escape the configured root.
-        resolved = path.resolve()
+        resolved = self._resolve(ref)
+        return gzip.decompress(unseal(resolved.read_bytes()))
+
+    def _resolve(self, ref: str) -> Path:
+        """Reject references that escape the configured root."""
+        resolved = (self.root / ref).resolve()
         if not resolved.is_relative_to(self.root.resolve()):
             raise ValueError(f"Transcript reference escapes the store root: {ref}")
-        return gzip.decompress(resolved.read_bytes())
+        return resolved
+
+    async def delete(self, ref: str) -> bool:
+        resolved = self._resolve(ref)
+        try:
+            resolved.unlink()
+        except FileNotFoundError:
+            # Already gone. Retention has to be safe to re-run.
+            return False
+        return True
 
 
 class S3TranscriptStore:
@@ -156,7 +255,9 @@ class S3TranscriptStore:
 
     async def put(self, tenant_id: uuid.UUID, payload: bytes) -> tuple[str, str, int]:
         sha = transcript_sha256(payload)
-        compressed = gzip.compress(payload)
+        # Bucket-side SSE is the primary control here; the envelope adds
+        # encryption the bucket operator cannot read, when a key is configured.
+        compressed = seal(gzip.compress(payload))
         key = self._key_for(tenant_id, sha)
         client = self._get_client()
 
@@ -171,12 +272,23 @@ class S3TranscriptStore:
         return self._ref_for(tenant_id, sha), sha, len(compressed)
 
     async def get(self, ref: str) -> bytes:
-        if ".." in ref or ref.startswith("/"):
-            raise ValueError(f"Transcript reference escapes the store root: {ref}")
-        key = "/".join(p for p in (self.prefix, ref) if p)
+        key = self._object_key(ref)
         client = self._get_client()
         response = await asyncio.to_thread(client.get_object, Bucket=self.bucket, Key=key)
-        return gzip.decompress(response["Body"].read())
+        return gzip.decompress(unseal(response["Body"].read()))
+
+    async def delete(self, ref: str) -> bool:
+        key = self._object_key(ref)
+        client = self._get_client()
+        # S3 delete_object is idempotent and does not report whether the key
+        # existed, so this reports success for an already-absent object too.
+        await asyncio.to_thread(client.delete_object, Bucket=self.bucket, Key=key)
+        return True
+
+    def _object_key(self, ref: str) -> str:
+        if ".." in ref or ref.startswith("/"):
+            raise ValueError(f"Transcript reference escapes the store root: {ref}")
+        return "/".join(p for p in (self.prefix, ref) if p)
 
 
 _store: TranscriptStore | None = None
