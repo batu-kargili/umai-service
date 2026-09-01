@@ -37,7 +37,7 @@ _PRODUCTION_OK_SETTINGS = dict(
     ai_engine_base_url="http://umai-engine:9000",
     cors_allow_origins=["https://app.example.com"],
     extension_ingest_jwt_hs256_secret="ext-secret",
-    sensor_ingest_jwt_hs256_secret="sensor-secret",
+    adr_ingest_jwt_hs256_secret="adr-secret",
 )
 
 
@@ -147,12 +147,12 @@ class ProductionRequiredTests(unittest.TestCase):
             ):
                 _run_assert()
 
-    def test_missing_sensor_ingest_jwt_secret_raises(self) -> None:
+    def test_missing_adr_ingest_jwt_secret_raises(self) -> None:
         with patched_settings(
-            **{**_PRODUCTION_OK_SETTINGS, "sensor_ingest_jwt_hs256_secret": None}
+            **{**_PRODUCTION_OK_SETTINGS, "adr_ingest_jwt_hs256_secret": None}
         ):
             with self.assertRaisesRegex(
-                RuntimeError, "UMAI_SENSOR_INGEST_JWT_HS256_SECRET"
+                RuntimeError, "UMAI_ADR_INGEST_JWT_HS256_SECRET"
             ):
                 _run_assert()
 

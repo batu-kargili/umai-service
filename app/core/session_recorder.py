@@ -77,7 +77,7 @@ def _counts(chat_history: list[dict[str, Any]]) -> tuple[int, int]:
 def _resolve_actor(payload: dict[str, Any], device_id: str | None) -> str | None:
     """Best available identity for the session.
 
-    A normalization rule, not directory resolution — the sensor reports an OS
+    A normalization rule, not directory resolution — the collector reports an OS
     username, not a corporate identity. Joining these to a directory is what
     turns them into people, and that lands with the identity connector.
     """

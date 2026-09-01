@@ -1,8 +1,7 @@
 """AI application registry: seed catalog, tenant materialization, matching.
 
 Single source of truth for AI application identity. Feeds:
-- server-side classification of incoming sensor/extension events (AppMatcher)
-- the sensor policy pack ``vendor_catalog`` (vendor_catalog_from_apps)
+- server-side classification of incoming collector/extension events (AppMatcher)
 - the Control Center "Application catalog" admin UI (ai_applications table)
 """
 
@@ -88,7 +87,7 @@ SEED_APPLICATIONS: list[dict[str, Any]] = [
         "icon_key": "claude-code",
         # Claude Code ships inside the Claude Desktop install and is
         # literally the same executable name (claude.exe); path_hint is what
-        # tells the two apart (mirrors sensor-core/src/apps.rs). No domains
+        # tells the two apart. No domains
         # here on purpose — network-only observations of anthropic.com stay
         # attributed to the "claude" chat-app entry; only a process-level
         # match with this path hint reclassifies as Claude Code.
@@ -129,7 +128,7 @@ SEED_APPLICATIONS: list[dict[str, Any]] = [
         "process_names": ["Ollama.exe"],
         "ports": [11434],
         "app_type": "desktop",
-        "sensor_capture": False,
+        "collector_capture": False,
         "inventory_only": True,
     },
     {
@@ -143,7 +142,7 @@ SEED_APPLICATIONS: list[dict[str, Any]] = [
         "process_names": ["LM Studio.exe"],
         "ports": [1234],
         "app_type": "desktop",
-        "sensor_capture": False,
+        "collector_capture": False,
         "inventory_only": True,
     },
     {
@@ -221,7 +220,7 @@ _SEED_DEFAULTS: dict[str, Any] = {
     "app_type": "web",
     "is_sanctioned": False,
     "is_training": False,
-    "sensor_capture": True,
+    "collector_capture": True,
     "inventory_only": False,
     "path_hint": None,
 }
@@ -280,7 +279,7 @@ async def ensure_tenant_catalog(session: AsyncSession, tenant_id: uuid.UUID) -> 
                 app_type=entry["app_type"],
                 is_sanctioned=entry["is_sanctioned"],
                 is_training=entry["is_training"],
-                sensor_capture=entry["sensor_capture"],
+                collector_capture=entry["collector_capture"],
                 inventory_only=entry["inventory_only"],
                 path_hint=entry["path_hint"],
                 enabled=True,
@@ -309,33 +308,6 @@ async def load_enabled_applications(
     return list(result.scalars().all())
 
 
-def vendor_catalog_from_apps(rows: list[AiApplication]) -> list[dict[str, Any]]:
-    """Project catalog rows into the sensor policy pack ``vendor_catalog`` shape.
-
-    Field names must match the Rust ``VendorCatalogEntry`` deserializer
-    (umai-sensor/crates/sensor-core/src/policy.rs).
-    """
-    catalog: list[dict[str, Any]] = []
-    for row in rows:
-        if not (row.sensor_capture or row.inventory_only):
-            continue
-        domains = [str(item) for item in _parse_json_list(row.domains_json)]
-        ports = [int(item) for item in _parse_json_list(row.ports_json)]
-        if not domains and not ports:
-            continue
-        entry: dict[str, Any] = {
-            "id": row.slug,
-            "display_name": row.name,
-            "domains": domains,
-            "match_strategy": "port" if ports and row.inventory_only else "sni",
-            "capture": bool(row.sensor_capture and not row.inventory_only),
-        }
-        if ports:
-            entry["ports"] = ports
-        if row.inventory_only:
-            entry["inventory_only"] = True
-        catalog.append(entry)
-    return catalog
 
 
 def _normalize_host(host: str) -> str:

@@ -92,13 +92,10 @@ class Settings(BaseSettings):
     extension_device_token_ttl_seconds: int = 60 * 60 * 24 * 30
     extension_policy_json: str | None = None
     extension_bootstrap_public_key_pem: str | None = None
-    sensor_ingest_jwt_hs256_secret: str | None = None
-    sensor_device_token_ttl_seconds: int = 60 * 60 * 24
-    # UMAI: how long after expiry a device may still exchange its token for a
-    # fresh one. A laptop that was off over a weekend must not need re-enrolling.
-    sensor_device_token_renew_grace_seconds: int = 60 * 60 * 24 * 30
-    sensor_policy_json: str | None = None
-    sensor_default_capture_mode: str = "metadata_only"
+    # ADR Collector authentication and fleet freshness.
+    adr_ingest_jwt_hs256_secret: str | None = None
+    adr_device_token_ttl_seconds: int = 60 * 60 * 24
+    adr_heartbeat_stale_seconds: int = 180
     # UMAI: blob root for agent session transcripts (ai_sessions.transcript_ref)
     transcript_store_path: str = "./data/transcripts"
     # `filesystem` (default) or `s3`. The filesystem backend needs a persistent
@@ -128,17 +125,6 @@ class Settings(BaseSettings):
     analysis_claim_lease_seconds: int = 30 * 60
     approved_mcp_servers: str | None = None
     sensitive_project_patterns: str | None = None
-    sensor_evaluate_timeout_ms: int = 1500
-    sensor_heartbeat_stale_seconds: int = 180
-    sensor_download_token_ttl_seconds: int = 30 * 60
-    sensor_installer_artifact_ttl_seconds: int = 60 * 60
-    sensor_installer_packager_url: str | None = None
-    sensor_installer_packager_timeout_seconds: float = 120.0
-    sensor_installer_service_url: str = "http://127.0.0.1:8080"
-    sensor_installer_control_center_url: str = "http://127.0.0.1:3001"
-    sensor_installer_customer: str = "smarttech-local"
-    sensor_installer_version: str = "local"
-    sensor_installer_self_sign: bool = True
 
     model_config = SettingsConfigDict(env_prefix="UMAI_", case_sensitive=False)
 

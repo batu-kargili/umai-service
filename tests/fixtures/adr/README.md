@@ -1,7 +1,7 @@
 # ADR ingest fixtures
 
 Three collected sessions, one per tool, in the exact shape the collector POSTs
-to `/api/v1/sensor/sessions`.
+to `/api/v1/adr/sessions`.
 
 | File | Tool | What it is |
 |---|---|---|

@@ -90,7 +90,7 @@ class AgtSupportTests(unittest.TestCase):
                 admin_jwt_hs256_secret=None,
                 cors_allow_origins=["https://app.example.com"],
                 extension_ingest_jwt_hs256_secret="ext-secret",
-                sensor_ingest_jwt_hs256_secret="sensor-secret",
+                adr_ingest_jwt_hs256_secret="adr-secret",
             ):
                 with self.assertRaisesRegex(RuntimeError, "UMAI_ADMIN_AUTH_MODE"):
                     validate_service_runtime()

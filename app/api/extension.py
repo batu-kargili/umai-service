@@ -284,9 +284,8 @@ def _verify_hs256_jwt(
 ) -> dict[str, Any]:
     """Verify an HS256 token.
 
-    ``expiry_leeway_seconds`` lets a caller accept a recently expired token —
-    used only by the sensor renewal path, where a device that was powered off
-    over a weekend still needs to exchange its old token for a fresh one.
+    ``expiry_leeway_seconds`` lets a caller accept a recently expired token
+    during a controlled credential-renewal flow.
     """
     parts = token.split(".")
     if len(parts) != 3:

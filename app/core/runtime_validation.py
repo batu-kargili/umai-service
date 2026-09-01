@@ -132,9 +132,9 @@ def _assert_production_required(production: bool) -> None:
         raise RuntimeError(
             "Production runtime requires UMAI_EXTENSION_INGEST_JWT_HS256_SECRET"
         )
-    if not settings.sensor_ingest_jwt_hs256_secret:
+    if not settings.adr_ingest_jwt_hs256_secret:
         raise RuntimeError(
-            "Production runtime requires UMAI_SENSOR_INGEST_JWT_HS256_SECRET"
+            "Production runtime requires UMAI_ADR_INGEST_JWT_HS256_SECRET"
         )
 
 

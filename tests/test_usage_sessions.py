@@ -7,8 +7,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.core.app_catalog import build_matcher, reset_catalog_memo, vendor_catalog_from_apps
-from app.core.app_catalog import load_enabled_applications
+from app.core.app_catalog import build_matcher, reset_catalog_memo
 from app.core.usage_sessions import fold_event_into_session
 from app.models.db import AiUsageSession, Base
 
@@ -270,28 +269,6 @@ class UsageSessionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 rows = await self._all_sessions(session)
                 self.assertEqual(rows[0].app_slug, "ollama")
-
-    async def test_vendor_catalog_projection_matches_rust_shape(self) -> None:
-        async with self.sessionmaker() as session:
-            async with session.begin():
-                matcher = await build_matcher(session, self.tenant_id)
-                self.assertIsNotNone(matcher)
-                rows = await load_enabled_applications(session, self.tenant_id)
-        catalog = vendor_catalog_from_apps(rows)
-        self.assertTrue(catalog)
-        by_id = {entry["id"]: entry for entry in catalog}
-        self.assertIn("chatgpt", by_id)
-        self.assertEqual(by_id["chatgpt"]["match_strategy"], "sni")
-        self.assertTrue(by_id["chatgpt"]["capture"])
-        self.assertIn("ollama", by_id)
-        self.assertEqual(by_id["ollama"]["match_strategy"], "port")
-        self.assertFalse(by_id["ollama"]["capture"])
-        self.assertTrue(by_id["ollama"]["inventory_only"])
-        for entry in catalog:
-            self.assertIsInstance(entry["id"], str)
-            self.assertIsInstance(entry["display_name"], str)
-            self.assertIsInstance(entry["domains"], list)
-
 
 if __name__ == "__main__":
     unittest.main()

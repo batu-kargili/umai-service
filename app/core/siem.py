@@ -224,7 +224,7 @@ async def emit_event(event: dict) -> None:
         url: str = endpoint["url"]
         payload, headers = _encode(event, endpoint)
         # Per-endpoint TLS verification. Defaults to on; set ``verify: false`` for
-        # endpoints behind a TLS-intercepting proxy (e.g. the UMAI sensor) or with
+        # endpoints behind a TLS-intercepting proxy or with
         # a self-signed cert. Demo-grade — prefer trusting the proxy CA in prod.
         verify = endpoint.get("verify", True)
 

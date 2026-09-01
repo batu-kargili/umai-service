@@ -245,7 +245,7 @@ class AiApplication(Base):
     app_type: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'web'"))
     is_sanctioned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     is_training: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    sensor_capture: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    collector_capture: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     inventory_only: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     path_hint: Mapped[str | None] = mapped_column(String(128))
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
@@ -312,8 +312,8 @@ class EndpointSensorEvent(Base):
     )
 
 
-class EndpointSensorDevice(Base):
-    __tablename__ = "endpoint_sensor_devices"
+class AdrDevice(Base):
+    __tablename__ = "adr_devices"
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, nullable=False)
     device_id: Mapped[str] = mapped_column(String(128), primary_key=True, nullable=False)
@@ -334,8 +334,8 @@ class EndpointSensorDevice(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'active'"))
 
 
-class EndpointSensorBootstrapToken(Base):
-    __tablename__ = "endpoint_sensor_bootstrap_tokens"
+class AdrBootstrapToken(Base):
+    __tablename__ = "adr_bootstrap_tokens"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
@@ -347,6 +347,35 @@ class EndpointSensorBootstrapToken(Base):
     created_by: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class AdrDeviceAuditEvent(Base):
+    """Security-relevant lifecycle event for an ADR collector credential.
+
+    Kept separate from ``audit_events`` because guardrail-specific columns in
+    that ledger are mandatory and have no truthful value for device actions.
+    """
+
+    __tablename__ = "adr_device_audit_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    actor: Mapped[str] = mapped_column(String(320), nullable=False)
+    detail_json: Mapped[str | None] = mapped_column(UnicodeText)
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP"), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_adr_device_audit_tenant_device_time",
+            "tenant_id",
+            "device_id",
+            "occurred_at",
+        ),
     )
 
 

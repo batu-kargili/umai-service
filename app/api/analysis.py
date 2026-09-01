@@ -111,6 +111,16 @@ class ResultResponse(_BaseModel):
     finding_raised: bool
 
 
+class ReleaseRequest(_BaseModel):
+    stage: str
+    worker_id: str
+    sessions: list[tuple[uuid.UUID, str]] = Field(default_factory=list, max_length=200)
+
+
+class ReleaseResponse(_BaseModel):
+    released: int
+
+
 def _authenticate_worker(authorization: str | None) -> None:
     expected = (settings.analysis_worker_token or "").strip()
     if not expected:
@@ -252,6 +262,42 @@ async def fetch_transcript(
         raise ServiceError("NOT_FOUND", "Transcript is no longer available", 404) from exc
 
     return Response(content=payload, media_type="application/json")
+
+
+@analysis_router.post("/release", response_model=ReleaseResponse)
+async def release_sessions(
+    payload: ReleaseRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    session: AsyncSession = Depends(get_session),
+) -> ReleaseResponse:
+    """Return unstarted work to the queue during a graceful worker shutdown."""
+    _authenticate_worker(authorization)
+    transition = STAGE_TRANSITIONS.get(payload.stage)
+    if transition is None:
+        raise ServiceError("INVALID_REQUEST", f"Unknown analysis stage: {payload.stage}", 422)
+    ready_status, claimed_status = transition
+    released = 0
+    async with session.begin():
+        for tenant_id, session_key in payload.sessions:
+            async with tenant_scope(session, str(tenant_id)):
+                row = await session.get(AiSession, (tenant_id, session_key))
+                if (
+                    row is not None
+                    and row.analysis_status == claimed_status
+                    and row.claimed_by == payload.worker_id[:64]
+                ):
+                    row.analysis_status = ready_status
+                    row.claimed_at = None
+                    row.claimed_by = None
+                    released += 1
+    if released:
+        logger.info(
+            "analysis.released stage=%s worker=%s count=%s",
+            payload.stage,
+            payload.worker_id,
+            released,
+        )
+    return ReleaseResponse(released=released)
 
 
 @analysis_router.post("/result", response_model=ResultResponse)

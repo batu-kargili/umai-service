@@ -1,4 +1,4 @@
-"""Ingest-time sessionization of sensor and extension events.
+"""Ingest-time sessionization of collector and extension events.
 
 Folds raw AI-usage events into ``ai_usage_sessions`` rows so dashboards read
 low-cardinality sessions instead of the raw event stream. Runs inside the
@@ -83,14 +83,14 @@ async def fold_event_into_session(
     """Attach one event to an open usage session, creating one if needed.
 
     Returns the session id to stamp on the raw event row, or None when the
-    event carries no usage signal (excluded types, unmatched sensor traffic).
+    event carries no usage signal (excluded types, unmatched collector traffic).
     """
     if event_type in SESSION_EXCLUDED_EVENT_TYPES:
         return None
 
     app = matcher.match(host, port, process_name, process_path)
     if app is None and source != "extension":
-        # Unmatched sensor traffic is noise — no session, event stays raw-only.
+        # Unmatched collector traffic is noise — no session, event stays raw-only.
         return None
 
     # Oracle hands back naive datetimes; normalize so every comparison below is

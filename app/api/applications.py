@@ -62,7 +62,7 @@ class ApplicationCatalogEntryResponse(_BaseModel):
     app_type: str
     is_sanctioned: bool
     is_training: bool
-    sensor_capture: bool
+    collector_capture: bool
     inventory_only: bool
     path_hint: str | None = None
     enabled: bool
@@ -85,7 +85,7 @@ class ApplicationCatalogCreateRequest(_BaseModel):
     app_type: str = "web"
     is_sanctioned: bool = False
     is_training: bool = False
-    sensor_capture: bool = True
+    collector_capture: bool = True
     inventory_only: bool = False
     path_hint: str | None = Field(default=None, max_length=128)
 
@@ -102,7 +102,7 @@ class ApplicationCatalogUpdateRequest(_BaseModel):
     app_type: str | None = None
     is_sanctioned: bool | None = None
     is_training: bool | None = None
-    sensor_capture: bool | None = None
+    collector_capture: bool | None = None
     inventory_only: bool | None = None
     path_hint: str | None = Field(default=None, max_length=128)
     enabled: bool | None = None
@@ -197,7 +197,7 @@ def _catalog_row_to_response(row: AiApplication) -> ApplicationCatalogEntryRespo
         app_type=row.app_type,
         is_sanctioned=row.is_sanctioned,
         is_training=row.is_training,
-        sensor_capture=row.sensor_capture,
+        collector_capture=row.collector_capture,
         inventory_only=row.inventory_only,
         path_hint=row.path_hint,
         enabled=row.enabled,
@@ -268,7 +268,7 @@ async def create_application_catalog_entry(
                 app_type=payload.app_type,
                 is_sanctioned=payload.is_sanctioned,
                 is_training=payload.is_training,
-                sensor_capture=payload.sensor_capture,
+                collector_capture=payload.collector_capture,
                 inventory_only=payload.inventory_only,
                 path_hint=payload.path_hint,
                 enabled=True,
@@ -320,8 +320,8 @@ async def update_application_catalog_entry(
                 row.is_sanctioned = payload.is_sanctioned
             if payload.is_training is not None:
                 row.is_training = payload.is_training
-            if payload.sensor_capture is not None:
-                row.sensor_capture = payload.sensor_capture
+            if payload.collector_capture is not None:
+                row.collector_capture = payload.collector_capture
             if payload.inventory_only is not None:
                 row.inventory_only = payload.inventory_only
             if payload.path_hint is not None:
