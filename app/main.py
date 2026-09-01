@@ -29,6 +29,7 @@ from app.api.public import router as public_router
 from app.core.errors import ServiceError
 from app.core.license import bootstrap_license
 from app.core.analysis_metrics import run_queue_sampler
+from app.core.pipeline_metrics import run_pipeline_sampler
 from app.core.request_metrics import RequestMetricsMiddleware
 from app.core.limits import (
     RequestLimiter,
@@ -98,9 +99,29 @@ async def lifespan(_app: FastAPI):
             settings.analysis_metrics_interval_seconds,
         )
 
+    # Asynchronous pipeline and freshness gauges (UMA-88). Shares the analysis
+    # metrics interval: both are periodic aggregate queries with the same trade-off.
+    pipeline_task = None
+    stop_pipeline = asyncio.Event()
+    if settings.analysis_metrics_enabled:
+        pipeline_task = asyncio.create_task(
+            run_pipeline_sampler(
+                get_sessionmaker(),
+                interval_s=settings.analysis_metrics_interval_seconds,
+                stop=stop_pipeline,
+            )
+        )
+        logger.info("pipeline_metrics.started")
+
     try:
         yield
     finally:
+        if pipeline_task is not None:
+            stop_pipeline.set()
+            pipeline_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await pipeline_task
+            logger.info("pipeline_metrics.stopped")
         if queue_task is not None:
             stop_queue.set()
             queue_task.cancel()

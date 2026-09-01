@@ -38,6 +38,7 @@ from app.core.transcript_retention import (
     delete_transcript,
     record_audit_event,
 )
+from app.core.pipeline_metrics import record_transcript_error
 from app.core.transcript_store import (
     TranscriptDecryptionError,
     get_transcript_store,
@@ -315,9 +316,12 @@ async def load_transcript(
         payload = await get_transcript_store().get(transcript_ref)
     except TranscriptDecryptionError as exc:
         # The evidence is on disk and the deployment is misconfigured. Calling
-        # that "expired" would quietly lose it.
+        # that "expired" would quietly lose it. Counted under its own reason so a
+        # key problem is not buried among ordinary missing transcripts.
+        record_transcript_error("get", "decrypt")
         raise ServiceError("TRANSCRIPT_UNREADABLE", str(exc), 500) from exc
     except (OSError, ValueError, KeyError) as exc:
+        record_transcript_error("get", "unavailable")
         # Retention removed it, or the blob store lost it. Either way the
         # finding survives without its evidence body.
         raise ServiceError(

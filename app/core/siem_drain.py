@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.siem import emit_event
+from app.core.pipeline_metrics import record_siem_delivery
 from app.core.siem_outbox import STATUS_DEAD_LETTER, STATUS_DELIVERED, STATUS_PENDING
 from app.models.db import SiemOutbox
 
@@ -139,6 +140,12 @@ async def drain_once(
             row.delivered_at = now
             row.last_error = None
             result.delivered += 1
+
+    # Recorded after the batch so the counters and the transaction agree: a rollback
+    # would otherwise leave metrics claiming deliveries the database never kept.
+    record_siem_delivery("delivered", result.delivered)
+    record_siem_delivery("retry", result.retried)
+    record_siem_delivery("dead_letter", result.dead_lettered)
 
     if result.attempted:
         logger.info(

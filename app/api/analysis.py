@@ -28,6 +28,7 @@ from app.core.errors import ServiceError
 from app.core.findings import upsert_finding
 from app.core.posture_rules import finding_key
 from app.core.analysis_metrics import record_claim, record_release, record_result
+from app.core.pipeline_metrics import record_transcript_error
 from app.core.secret_rotation import accepted, matches_any
 from app.core.transcript_retention import ACTION_READ, record_audit_event
 from app.core.transcript_store import TranscriptDecryptionError
@@ -293,8 +294,10 @@ async def fetch_transcript(
     except TranscriptDecryptionError as exc:
         # The evidence exists and the deployment is misconfigured. Reporting it as
         # missing would let a key problem look like retention.
+        record_transcript_error("get", "decrypt")
         raise ServiceError("TRANSCRIPT_UNREADABLE", str(exc), 500) from exc
     except (OSError, ValueError, KeyError) as exc:
+        record_transcript_error("get", "unavailable")
         raise ServiceError("NOT_FOUND", "Transcript is no longer available", 404) from exc
 
     # Recorded before the bytes are returned, so an audited read cannot be served

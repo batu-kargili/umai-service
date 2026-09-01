@@ -33,6 +33,7 @@ from app.core.finding_schema import (
     MODE_POSTURE_ONLY,
 )
 from app.core.session_recorder import record_agent_sessions, session_key
+from app.core.pipeline_metrics import record_ingest_request, record_ingest_sessions
 from app.core.secret_rotation import accepted
 from app.core.settings import settings
 from app.models.db import (
@@ -671,6 +672,9 @@ async def ingest_adr_sessions(
                     sessions=accepted_payloads,
                 )
     except ServiceError as exc:
+        record_ingest_request(
+            "denied" if exc.status_code in (401, 403, 404) else "rejected"
+        )
         denied_device = x_device_id or principal.device_id
         if exc.error_type == "ADR_DEVICE_REVOKED" and denied_device:
             async with db.begin():
@@ -685,6 +689,13 @@ async def ingest_adr_sessions(
                     )
         raise
 
+    record_ingest_request("accepted")
+    record_ingest_sessions(
+        created=result.created,
+        updated=result.updated,
+        unchanged=result.unchanged,
+        rejected=len(rejected),
+    )
     logger.info(
         "adr.sessions.ingested tenant=%s device=%s created=%s updated=%s unchanged=%s rejected=%s",
         principal.tenant_id,
