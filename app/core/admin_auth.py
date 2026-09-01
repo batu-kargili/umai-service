@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from fastapi import Request
 
 from app.core.errors import ServiceError
+from app.core.secret_rotation import accepted
 from app.core.settings import settings
 from app.core.token_audiences import NON_ADMIN_AUDIENCES
 
@@ -118,11 +119,27 @@ def _verify_hs256_jwt(token: str, secret: str) -> dict:
 
 
 def _decode_jwt_principal(token: str) -> AdminPrincipal:
-    secret = settings.admin_jwt_hs256_secret
-    if not secret:
+    secrets = accepted(
+        settings.admin_jwt_hs256_secret, settings.admin_jwt_hs256_secret_previous
+    )
+    if not secrets:
         raise ServiceError("AUTH_MISCONFIGURED", "Admin JWT secret not configured", 500)
 
-    payload = _verify_hs256_jwt(token, secret)
+    # During a rotation both secrets verify. Only a signature failure falls through to
+    # the next candidate: an expired token or a foreign audience is a decision, not a
+    # reason to retry with another key.
+    last_error: ServiceError | None = None
+    payload = None
+    for secret in secrets:
+        try:
+            payload = _verify_hs256_jwt(token, secret)
+            break
+        except ServiceError as exc:
+            if "signature" not in exc.message.lower():
+                raise
+            last_error = exc
+    if payload is None:
+        raise last_error or ServiceError("TOKEN_INVALID", "JWT signature mismatch", 401)
 
     tenant_id_str = payload.get("tenant_id")
     tenant_id: uuid.UUID | None = None

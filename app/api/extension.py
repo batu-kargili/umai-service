@@ -10,6 +10,7 @@ import logging
 import time
 import uuid
 from collections import Counter
+from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -35,6 +36,7 @@ from app.core.file_inspection import extract_attachment_text
 from app.core.library import get_guardrail_template
 from app.core.license import license_allows_llm_calls, require_active_license
 from app.core.resolver import resolve_guardrail
+from app.core.secret_rotation import accepted
 from app.core.settings import settings
 from app.core.siem import emit_event
 from app.models.engine import EngineFlags, EngineRequest, EngineResponse
@@ -278,7 +280,7 @@ def _encode_hs256_jwt(payload: dict[str, Any], secret: str) -> str:
 
 def _verify_hs256_jwt(
     token: str,
-    secret: str,
+    secret: str | Sequence[str],
     *,
     audience: str,
     required_role: str,
@@ -286,24 +288,38 @@ def _verify_hs256_jwt(
 ) -> dict[str, Any]:
     """Verify an HS256 token.
 
+    ``secret`` may be several values, in which case the token verifies against any of
+    them. That is how a rotation keeps working: the previous ingest secret still
+    verifies while the new one is being rolled out (UMA-84). Only the signature check
+    is retried across candidates — an expired token or a wrong audience is a decision,
+    not a reason to try another key.
+
     ``expiry_leeway_seconds`` lets a caller accept a recently expired token
     during a controlled credential-renewal flow.
     """
+    candidates = [secret] if isinstance(secret, str) else list(secret)
     parts = token.split(".")
     if len(parts) != 3:
         raise ServiceError("TOKEN_INVALID", "Malformed extension token", 401)
 
     header_b64, payload_b64, sig_b64 = parts
     signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
-    secret_bytes = secret.encode("utf-8")
 
-    expected_sig = hmac.new(secret_bytes, signing_input, hashlib.sha256).digest()
     try:
         actual_sig = base64.urlsafe_b64decode(_pad_b64(sig_b64))
     except Exception as exc:  # pragma: no cover - defensive decoding
         raise ServiceError("TOKEN_INVALID", "Invalid extension token signature", 401) from exc
 
-    if not hmac.compare_digest(expected_sig, actual_sig):
+    # Every candidate is checked even after a match, so the time taken does not reveal
+    # which secret matched and therefore whether a rotation is in progress.
+    signature_ok = False
+    for candidate in candidates:
+        expected_sig = hmac.new(
+            candidate.encode("utf-8"), signing_input, hashlib.sha256
+        ).digest()
+        if hmac.compare_digest(expected_sig, actual_sig):
+            signature_ok = True
+    if not signature_ok:
         raise ServiceError("TOKEN_INVALID", "Extension token signature mismatch", 401)
 
     try:
@@ -350,7 +366,10 @@ def _authenticate_extension_request(
             raise ServiceError("INVALID_REQUEST", "X-Tenant-Id is required", 422)
         return ExtensionAuthPrincipal(tenant_id=tenant_id, subject="static-extension-token")
 
-    secret = (settings.extension_ingest_jwt_hs256_secret or "").strip()
+    secret = accepted(
+        settings.extension_ingest_jwt_hs256_secret,
+        settings.extension_ingest_jwt_hs256_secret_previous,
+    )
     if not secret:
         raise ServiceError(
             "AUTH_MISCONFIGURED",
@@ -387,7 +406,10 @@ def _authenticate_extension_bootstrap_request(
     if tenant_id is None:
         raise ServiceError("INVALID_REQUEST", "X-Tenant-Id or tenant_id is required", 422)
 
-    secret = (settings.extension_ingest_jwt_hs256_secret or "").strip()
+    secret = accepted(
+        settings.extension_ingest_jwt_hs256_secret,
+        settings.extension_ingest_jwt_hs256_secret_previous,
+    )
     if not secret:
         raise ServiceError(
             "AUTH_MISCONFIGURED",

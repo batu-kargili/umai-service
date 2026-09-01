@@ -50,24 +50,49 @@ class TranscriptDecryptionError(RuntimeError):
     """
 
 
-def _encryption_key() -> bytes | None:
-    """The configured AES-256 key, or None when encryption is off."""
-    configured = (settings.transcript_encryption_key or "").strip()
-    if not configured:
-        return None
+def _decode_key(configured: str, name: str) -> bytes:
     try:
         key = base64.b64decode(configured, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise RuntimeError(
-            "UMAI_TRANSCRIPT_ENCRYPTION_KEY must be base64. "
+            f"{name} must be base64. "
             "Generate one with: python -c \"import os,base64;"
             "print(base64.b64encode(os.urandom(32)).decode())\""
         ) from exc
     if len(key) != 32:
-        raise RuntimeError(
-            f"UMAI_TRANSCRIPT_ENCRYPTION_KEY must decode to 32 bytes, got {len(key)}."
-        )
+        raise RuntimeError(f"{name} must decode to 32 bytes, got {len(key)}.")
     return key
+
+
+def _encryption_key() -> bytes | None:
+    """The key new transcripts are sealed with, or None when encryption is off.
+
+    Only ever the current key. A rotation must not start writing blobs the operator
+    is about to stop accepting.
+    """
+    configured = (settings.transcript_encryption_key or "").strip()
+    if not configured:
+        return None
+    return _decode_key(configured, "UMAI_TRANSCRIPT_ENCRYPTION_KEY")
+
+
+def _decryption_keys() -> list[bytes]:
+    """Keys that may open a sealed blob, current first (UMA-84).
+
+    During a rotation the previous key is still the only thing that can read
+    transcripts already on disk. Accepting it here is what makes rotating the
+    transcript key survivable: without it, rotation is permanent evidence loss.
+    """
+    keys: list[bytes] = []
+    current = (settings.transcript_encryption_key or "").strip()
+    if current:
+        keys.append(_decode_key(current, "UMAI_TRANSCRIPT_ENCRYPTION_KEY"))
+    previous = (settings.transcript_encryption_key_previous or "").strip()
+    if previous:
+        candidate = _decode_key(previous, "UMAI_TRANSCRIPT_ENCRYPTION_KEY_PREVIOUS")
+        if candidate not in keys:
+            keys.append(candidate)
+    return keys
 
 
 def seal(payload: bytes) -> bytes:
@@ -92,8 +117,8 @@ def unseal(blob: bytes) -> bytes:
     if not blob.startswith(_ENVELOPE_MAGIC):
         return blob
 
-    key = _encryption_key()
-    if key is None:
+    keys = _decryption_keys()
+    if not keys:
         raise TranscriptDecryptionError(
             "This transcript is encrypted but UMAI_TRANSCRIPT_ENCRYPTION_KEY is not set."
         )
@@ -103,13 +128,43 @@ def unseal(blob: bytes) -> bytes:
 
     header = len(_ENVELOPE_MAGIC)
     nonce = blob[header : header + _NONCE_BYTES]
+    ciphertext = blob[header + _NONCE_BYTES :]
+    for key in keys:
+        try:
+            return AESGCM(key).decrypt(nonce, ciphertext, None)
+        except InvalidTag:
+            continue
+    raise TranscriptDecryptionError(
+        "This transcript could not be decrypted with the configured key, or with "
+        "UMAI_TRANSCRIPT_ENCRYPTION_KEY_PREVIOUS if one is set. It was written with "
+        "a different key."
+    )
+
+
+def needs_resealing(blob: bytes) -> bool:
+    """Whether this blob is sealed with something other than the current key.
+
+    Used by the rotation runbook: a rotation is only finished once nothing needs
+    resealing, because only then can the previous key be cleared.
+    """
+    if not blob.startswith(_ENVELOPE_MAGIC):
+        # Unencrypted. It needs sealing if encryption is now configured.
+        return _encryption_key() is not None
+
+    current = _encryption_key()
+    if current is None:
+        return False
+
+    from cryptography.exceptions import InvalidTag  # noqa: PLC0415
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: PLC0415
+
+    header = len(_ENVELOPE_MAGIC)
+    nonce = blob[header : header + _NONCE_BYTES]
     try:
-        return AESGCM(key).decrypt(nonce, blob[header + _NONCE_BYTES :], None)
-    except InvalidTag as exc:
-        raise TranscriptDecryptionError(
-            "This transcript could not be decrypted with the configured key. "
-            "It was written with a different one."
-        ) from exc
+        AESGCM(current).decrypt(nonce, blob[header + _NONCE_BYTES :], None)
+    except InvalidTag:
+        return True
+    return False
 
 
 class TranscriptStore(Protocol):

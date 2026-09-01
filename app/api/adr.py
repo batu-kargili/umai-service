@@ -33,6 +33,7 @@ from app.core.finding_schema import (
     MODE_POSTURE_ONLY,
 )
 from app.core.session_recorder import record_agent_sessions, session_key
+from app.core.secret_rotation import accepted
 from app.core.settings import settings
 from app.models.db import (
     AdrDeviceAuditEvent,
@@ -140,10 +141,31 @@ class AdrPrincipal:
 
 
 def _adr_jwt_secret() -> str:
+    """The secret new collector tokens are signed with. Current only.
+
+    A rotation must not start minting tokens with a secret the operator is about to
+    stop accepting.
+    """
     secret = (settings.adr_ingest_jwt_hs256_secret or "").strip()
     if not secret:
         raise ServiceError("AUTH_MISCONFIGURED", "ADR collector auth is not configured", 500)
     return secret
+
+
+def _adr_accepted_secrets() -> list[str]:
+    """Secrets a presented collector token may verify against (UMA-84).
+
+    Includes the previous secret while one is configured, so a fleet's live device
+    tokens keep working through a rotation instead of every collector needing to
+    re-enrol the moment the secret changes.
+    """
+    secrets = accepted(
+        settings.adr_ingest_jwt_hs256_secret,
+        settings.adr_ingest_jwt_hs256_secret_previous,
+    )
+    if not secrets:
+        raise ServiceError("AUTH_MISCONFIGURED", "ADR collector auth is not configured", 500)
+    return secrets
 
 
 def _issue_adr_device_token(
@@ -221,7 +243,7 @@ def _verified_payload(
     try:
         return _verify_hs256_jwt(
             authorization.split(" ", 1)[1].strip(),
-            _adr_jwt_secret(),
+            _adr_accepted_secrets(),
             audience=audience,
             required_role=role,
         )

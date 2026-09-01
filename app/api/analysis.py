@@ -27,6 +27,9 @@ from app.core.db import get_session, tenant_scope
 from app.core.errors import ServiceError
 from app.core.findings import upsert_finding
 from app.core.posture_rules import finding_key
+from app.core.secret_rotation import accepted, matches_any
+from app.core.transcript_retention import ACTION_READ, record_audit_event
+from app.core.transcript_store import TranscriptDecryptionError
 from app.core.settings import settings
 from app.core.transcript_store import get_transcript_store
 from app.models.db import AiSession
@@ -122,12 +125,16 @@ class ReleaseResponse(_BaseModel):
 
 
 def _authenticate_worker(authorization: str | None) -> None:
-    expected = (settings.analysis_worker_token or "").strip()
+    # Accepts the previous token too while a rotation is in flight, so the worker
+    # fleet does not have to be restarted in lockstep with the service (UMA-84).
+    expected = accepted(
+        settings.analysis_worker_token, settings.analysis_worker_token_previous
+    )
     if not expected:
         raise ServiceError("AUTH_MISCONFIGURED", "Analysis worker auth is not configured", 500)
     if not authorization or not authorization.lower().startswith("bearer "):
         raise ServiceError("UNAUTHENTICATED", "Bearer token required for analysis access", 401)
-    if not hmac.compare_digest(authorization.split(" ", 1)[1].strip(), expected):
+    if not matches_any(authorization.split(" ", 1)[1].strip(), expected):
         raise ServiceError("TOKEN_INVALID", "Analysis worker token is invalid", 401)
 
 
@@ -244,9 +251,16 @@ async def fetch_transcript(
     tenant_id: uuid.UUID,
     session_key: str,
     authorization: str | None = Header(default=None, alias="Authorization"),
+    worker_id: str | None = Header(default=None, alias="X-Worker-Id"),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    """Return the stored transcript for a claimed session."""
+    """Return the stored transcript for a claimed session.
+
+    Audited like every other read of conversation content (UMA-84). The worker is
+    unattended, but it is still an actor: "the analysis worker read this employee's
+    session" belongs in the same trail as an operator doing it, or the audit trail
+    understates who has seen the content.
+    """
     _authenticate_worker(authorization)
 
     async with session.begin():
@@ -256,10 +270,33 @@ async def fetch_transcript(
                 raise ServiceError("NOT_FOUND", "Session not found", 404)
             transcript_ref = row.transcript_ref
 
+    # A session whose transcript was never stored, or has been reaped, has no ref.
+    # Passing None to the store raises TypeError, which is a 500 for what is really
+    # an ordinary missing-transcript case.
+    if not transcript_ref:
+        raise ServiceError("NOT_FOUND", "Transcript is no longer available", 404)
+
     try:
         payload = await get_transcript_store().get(transcript_ref)
-    except (OSError, ValueError) as exc:
+    except TranscriptDecryptionError as exc:
+        # The evidence exists and the deployment is misconfigured. Reporting it as
+        # missing would let a key problem look like retention.
+        raise ServiceError("TRANSCRIPT_UNREADABLE", str(exc), 500) from exc
+    except (OSError, ValueError, KeyError) as exc:
         raise ServiceError("NOT_FOUND", "Transcript is no longer available", 404) from exc
+
+    # Recorded before the bytes are returned, so an audited read cannot be served
+    # without the row landing first.
+    actor = f"analysis-worker:{worker_id[:64]}" if worker_id else "analysis-worker"
+    async with session.begin():
+        record_audit_event(
+            session,
+            tenant_id=tenant_id,
+            session_key=session_key,
+            action=ACTION_READ,
+            actor=actor,
+            transcript_bytes=len(payload),
+        )
 
     return Response(content=payload, media_type="application/json")
 

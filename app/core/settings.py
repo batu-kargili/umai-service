@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     max_concurrent_public: int = 64
     max_body_bytes_default: int = 1 * 1024 * 1024
     admin_jwt_hs256_secret: str | None = None
+    # Rotation overlap (UMA-84). While a _previous value is set, credentials signed
+    # with it still verify, but nothing new is ever minted or sealed with it.
+    # Clearing the _previous value is what completes a rotation.
+    admin_jwt_hs256_secret_previous: str | None = None
     # Optional. When set, an admin JWT must carry exactly this audience. Left unset,
     # the service only refuses audiences it knows belong to another surface.
     admin_jwt_audience: str | None = None
@@ -111,11 +115,13 @@ class Settings(BaseSettings):
     admin_auth_mode: str | None = None
     extension_ingest_bearer_token: str | None = None
     extension_ingest_jwt_hs256_secret: str | None = None
+    extension_ingest_jwt_hs256_secret_previous: str | None = None
     extension_device_token_ttl_seconds: int = 60 * 60 * 24 * 30
     extension_policy_json: str | None = None
     extension_bootstrap_public_key_pem: str | None = None
     # ADR Collector authentication and fleet freshness.
     adr_ingest_jwt_hs256_secret: str | None = None
+    adr_ingest_jwt_hs256_secret_previous: str | None = None
     adr_device_token_ttl_seconds: int = 60 * 60 * 24
     adr_heartbeat_stale_seconds: int = 180
     # UMAI: blob root for agent session transcripts (ai_sessions.transcript_ref)
@@ -136,6 +142,10 @@ class Settings(BaseSettings):
     # the clear, which is only defensible when the volume itself is encrypted.
     # Blobs already on disk stay readable either way — the format is tagged.
     transcript_encryption_key: str | None = None
+    # Rotation overlap. Transcripts sealed with the previous key stay readable
+    # while this is set; nothing is ever sealed with it. Re-seal the existing
+    # blobs, then clear it — see docs/secret-rotation.md.
+    transcript_encryption_key_previous: str | None = None
     # UMAI: retention sweep. Off by default so an upgrade never deletes
     # evidence a customer did not agree to lose.
     transcript_retention_enabled: bool = False
@@ -144,6 +154,7 @@ class Settings(BaseSettings):
     # control produces no findings rather than false ones.
     # UMAI: shared secret for the analysis worker's internal endpoints.
     analysis_worker_token: str | None = None
+    analysis_worker_token_previous: str | None = None
     analysis_claim_lease_seconds: int = 30 * 60
     approved_mcp_servers: str | None = None
     sensitive_project_patterns: str | None = None
