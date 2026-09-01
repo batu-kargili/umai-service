@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     # PROCESS: there is no shared counter, so a deployment running N workers admits
     # N times the configured rate. Fleet capacity is workers x limit.
     request_limits_enabled: bool = True
+    # Metrics cardinality caps (UMA-86). A label fed from request data grows one
+    # time series per distinct value; past the cap further values report as 'other'.
+    metrics_route_cardinality_cap: int = 200
+    # Tenant is off by default: it would multiply every histogram's series count.
+    metrics_tenant_label_enabled: bool = False
+    metrics_tenant_cardinality_cap: int = 50
     # Collector and extension upload. High rate, large bodies: a fleet uploads often.
     rate_limit_ingest_per_minute: int = 600
     max_body_bytes_ingest: int = 32 * 1024 * 1024

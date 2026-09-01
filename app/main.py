@@ -28,6 +28,7 @@ from app.core.transcript_retention import run_retention_loop
 from app.api.public import router as public_router
 from app.core.errors import ServiceError
 from app.core.license import bootstrap_license
+from app.core.request_metrics import RequestMetricsMiddleware
 from app.core.limits import (
     RequestLimiter,
     RequestLimitsMiddleware,
@@ -111,6 +112,11 @@ def create_app() -> FastAPI:
     # so a browser caller sees the 429 or 413 instead of an opaque CORS failure. The
     # limits still run before the router, so an oversized body never reaches a handler.
     app.add_middleware(RequestLimitsMiddleware, limiter=RequestLimiter(build_policies()))
+
+    # Request timing (UMA-86). Inside the limits middleware, so a request rejected by a
+    # limit is not counted as a served request with a misleading latency; the rejection
+    # is already visible in umai_request_limit_rejected_total.
+    app.add_middleware(RequestMetricsMiddleware)
 
     # Allow configured frontends to call the API across origins.
     app.add_middleware(
