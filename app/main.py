@@ -28,6 +28,7 @@ from app.core.transcript_retention import run_retention_loop
 from app.api.public import router as public_router
 from app.core.errors import ServiceError
 from app.core.license import bootstrap_license
+from app.core.analysis_metrics import run_queue_sampler
 from app.core.request_metrics import RequestMetricsMiddleware
 from app.core.limits import (
     RequestLimiter,
@@ -80,9 +81,32 @@ async def lifespan(_app: FastAPI):
             settings.transcript_retention_interval_seconds,
         )
 
+    # Analysis queue gauges (UMA-87). On by default: two cheap aggregate queries per
+    # interval, and a backlog nobody can see is the failure this exists to prevent.
+    queue_task = None
+    stop_queue = asyncio.Event()
+    if settings.analysis_metrics_enabled:
+        queue_task = asyncio.create_task(
+            run_queue_sampler(
+                get_sessionmaker(),
+                interval_s=settings.analysis_metrics_interval_seconds,
+                stop=stop_queue,
+            )
+        )
+        logger.info(
+            "analysis_metrics.started interval=%s",
+            settings.analysis_metrics_interval_seconds,
+        )
+
     try:
         yield
     finally:
+        if queue_task is not None:
+            stop_queue.set()
+            queue_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await queue_task
+            logger.info("analysis_metrics.stopped")
         if drain_task is not None:
             stop_drain.set()
             drain_task.cancel()

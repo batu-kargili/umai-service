@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     # Metrics cardinality caps (UMA-86). A label fed from request data grows one
     # time series per distinct value; past the cap further values report as 'other'.
     metrics_route_cardinality_cap: int = 200
+    # Analysis queue gauges (UMA-87). Sampled by a background loop rather than on
+    # scrape: a scrape must not fail because the database is slow, which is exactly
+    # when the metrics matter most.
+    analysis_metrics_enabled: bool = True
+    analysis_metrics_interval_seconds: float = 30.0
     # Tenant is off by default: it would multiply every histogram's series count.
     metrics_tenant_label_enabled: bool = False
     metrics_tenant_cardinality_cap: int = 50

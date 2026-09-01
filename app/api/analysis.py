@@ -27,6 +27,7 @@ from app.core.db import get_session, tenant_scope
 from app.core.errors import ServiceError
 from app.core.findings import upsert_finding
 from app.core.posture_rules import finding_key
+from app.core.analysis_metrics import record_claim, record_release, record_result
 from app.core.secret_rotation import accepted, matches_any
 from app.core.transcript_retention import ACTION_READ, record_audit_event
 from app.core.transcript_store import TranscriptDecryptionError
@@ -202,6 +203,7 @@ async def claim_sessions(
         # Reclaim leases from workers that died mid-stage. Without this a
         # crashed worker parks its batch in `*ing` forever and the sessions are
         # never analysed — the failure nobody notices.
+        fresh_count = len(rows)
         if len(rows) < payload.limit:
             stale = _lock_rows(
                 select(AiSession).where(
@@ -214,6 +216,7 @@ async def claim_sessions(
                 stale = stale.where(AiSession.tenant_id == payload.tenant_id)
             stale = stale.limit(payload.limit - len(rows))
             rows.extend((await session.execute(stale)).scalars().all())
+        reclaimed_count = len(rows) - fresh_count
 
         for row in rows:
             row.analysis_status = claimed_status
@@ -236,12 +239,21 @@ async def claim_sessions(
                 )
             )
 
+    record_claim(payload.stage, fresh_count, reclaimed_count)
     if claimed:
         logger.info(
-            "analysis.claimed stage=%s worker=%s count=%s",
+            "analysis.claimed stage=%s worker=%s count=%s reclaimed=%s",
             payload.stage,
             payload.worker_id,
             len(claimed),
+            reclaimed_count,
+        )
+    if reclaimed_count:
+        # Worth its own line: a worker died holding these, and nothing else reports it.
+        logger.warning(
+            "analysis.lease_reclaimed stage=%s count=%s",
+            payload.stage,
+            reclaimed_count,
         )
     return ClaimResponse(stage=payload.stage, sessions=claimed)
 
@@ -327,6 +339,7 @@ async def release_sessions(
                     row.claimed_at = None
                     row.claimed_by = None
                     released += 1
+    record_release(payload.stage, released)
     if released:
         logger.info(
             "analysis.released stage=%s worker=%s count=%s",
@@ -359,6 +372,14 @@ async def record_analysis_result(
             if row is None:
                 raise ServiceError("NOT_FOUND", "Session not found", 404)
 
+            # Captured before the lease is cleared: this is how long the worker held
+            # the session, which is the queue's service time.
+            held_seconds = None
+            if row.claimed_at is not None:
+                claimed_at = row.claimed_at
+                if claimed_at.tzinfo is None:
+                    claimed_at = claimed_at.replace(tzinfo=dt.timezone.utc)
+                held_seconds = (now - claimed_at).total_seconds()
             row.claimed_at = None
             row.claimed_by = None
 
@@ -377,6 +398,16 @@ async def record_analysis_result(
                     payload.session_key,
                     row.analysis_attempts,
                     row.analysis_error,
+                )
+                record_result(
+                    payload.stage,
+                    payload.verdict,
+                    held_seconds=held_seconds,
+                    model=payload.model,
+                    input_tokens=payload.input_tokens,
+                    output_tokens=payload.output_tokens,
+                    cost_usd=payload.cost_usd,
+                    failed=True,
                 )
                 return ResultResponse(
                     session_key=payload.session_key,
@@ -413,6 +444,15 @@ async def record_analysis_result(
                 )
                 siem_events.extend(events)
 
+    record_result(
+        payload.stage,
+        payload.verdict,
+        held_seconds=held_seconds,
+        model=payload.model,
+        input_tokens=payload.input_tokens,
+        output_tokens=payload.output_tokens,
+        cost_usd=payload.cost_usd,
+    )
     logger.info(
         "analysis.result stage=%s session=%s verdict=%s tactic=%s",
         payload.stage,
