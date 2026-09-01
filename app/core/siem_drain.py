@@ -23,7 +23,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.siem import emit_event
-from app.core.pipeline_metrics import record_siem_delivery
+from app.core.pipeline_metrics import (
+    record_retention_failure,
+    record_retention_sweep,
+    record_siem_delivery,
+)
+from app.core.settings import settings
 from app.core.siem_outbox import STATUS_DEAD_LETTER, STATUS_DELIVERED, STATUS_PENDING
 from app.models.db import SiemOutbox
 
@@ -210,6 +215,61 @@ def classify_http_status(status_code: int) -> None:
     raise httpx.HTTPError(f"HTTP {status_code}")
 
 
+async def prune_delivered(
+    db: AsyncSession,
+    *,
+    retention_days: int | None = None,
+    now: dt.datetime | None = None,
+    limit: int = 1000,
+) -> int:
+    """Delete outbox rows that were delivered long enough ago to be uninteresting.
+
+    Nothing removed these before, so the outbox grew for the life of the deployment: one
+    row per finding, each carrying the finding's full payload, kept forever after it had
+    been delivered. It is the fastest-growing table the platform owns and the only one
+    whose contents are pure duplication — the finding itself is in `findings`, and a
+    delivered row is a receipt.
+
+    Deliberately narrow. `pending` rows are undelivered work and `dead_letter` rows are a
+    finding the SOC has never seen, which an operator has to replay; deleting either would
+    be losing a security event to a cleanup job.
+
+    Idempotent: rows already gone are simply not selected, so re-running deletes nothing
+    and reports zero.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    if retention_days is None:
+        retention_days = int(settings.siem_outbox_retention_days)
+    if retention_days <= 0:
+        return 0
+
+    cutoff = now - dt.timedelta(days=retention_days)
+    async with db.begin():
+        rows = list(
+            (
+                await db.execute(
+                    select(SiemOutbox)
+                    .where(
+                        SiemOutbox.status == STATUS_DELIVERED,
+                        SiemOutbox.delivered_at.is_not(None),
+                        SiemOutbox.delivered_at < cutoff,
+                    )
+                    .order_by(SiemOutbox.delivered_at.asc())
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for row in rows:
+            await db.delete(row)
+
+    record_retention_sweep("siem_outbox", deleted=len(rows), now=now)
+    if rows:
+        logger.info("siem_outbox.pruned deleted=%s older_than_days=%s", len(rows), retention_days)
+    return len(rows)
+
+
 async def run_drain_loop(
     session_factory, *, interval_s: float = 5.0, stop: asyncio.Event | None = None
 ) -> None:
@@ -219,12 +279,25 @@ async def run_drain_loop(
     integration down with it, and nothing would say so.
     """
     stop = stop or asyncio.Event()
+    # The prune runs on its own, much slower clock. At the drain interval it would be
+    # thousands of pointless queries a day against the table the drain needs to be fast.
+    prune_every = max(1, int(settings.siem_outbox_prune_interval_seconds / max(interval_s, 1)))
+    ticks = 0
     while not stop.is_set():
         try:
             async with session_factory() as db:
                 await drain_once(db)
         except Exception:  # noqa: BLE001
             logger.exception("siem_drain.loop_error")
+
+        ticks += 1
+        if ticks % prune_every == 0:
+            try:
+                async with session_factory() as db:
+                    await prune_delivered(db)
+            except Exception:  # noqa: BLE001
+                record_retention_failure("siem_outbox")
+                logger.exception("siem_outbox.prune_error")
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_s)
         except asyncio.TimeoutError:

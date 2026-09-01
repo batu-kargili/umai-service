@@ -18,9 +18,10 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.pipeline_metrics import record_retention_failure, record_retention_sweep
 from app.core.settings import settings
 from app.core.transcript_store import TranscriptStore, get_transcript_store
 from app.models.db import AiSession, Tenant, TranscriptAuditEvent
@@ -48,6 +49,12 @@ class ReapResult:
     # session still references the same content.
     blobs_shared: int = 0
     failed: int = 0
+    # A row the query selected as expired that the age check then disagreed with.
+    # Should always be zero: the two use the same window, so a non-zero value means
+    # the database and Python read `observed_at` differently. Counted rather than
+    # ignored, because that disagreement would otherwise present as a sweep that
+    # runs cleanly and deletes nothing.
+    disputed: int = 0
 
 
 def record_audit_event(
@@ -216,11 +223,35 @@ async def reap_expired_transcripts(
             ).all()
         }
 
+        # The window has to be part of the query, not a filter applied afterwards.
+        #
+        # Selecting the oldest rows and skipping the ones inside their window starves:
+        # a tenant keeping content for a year fills every batch with rows that are old
+        # but not expired, and the sweep re-reads the same rows forever while a second
+        # tenant's seven-day content sits behind them and is never reached. Nothing
+        # fails — the sweep runs, deletes nothing, and the retention promise quietly
+        # stops being kept.
+        default_cutoff = now - dt.timedelta(days=DEFAULT_RETENTION_DAYS)
+        expired = [
+            and_(
+                AiSession.tenant_id == tenant_id,
+                AiSession.observed_at < now - dt.timedelta(days=days),
+            )
+            for tenant_id, days in retention.items()
+        ]
+        # A session whose tenant row is gone falls back to the default window rather
+        # than never expiring.
+        expired.append(
+            and_(AiSession.tenant_id.not_in(set(retention)), AiSession.observed_at < default_cutoff)
+            if retention
+            else AiSession.observed_at < default_cutoff
+        )
+
         rows = list(
             (
                 await db.execute(
                     select(AiSession)
-                    .where(AiSession.transcript_ref.is_not(None))
+                    .where(AiSession.transcript_ref.is_not(None), or_(*expired))
                     .order_by(AiSession.observed_at.asc())
                     .limit(limit)
                 )
@@ -233,6 +264,7 @@ async def reap_expired_transcripts(
             result.scanned += 1
             days = retention.get(row.tenant_id, DEFAULT_RETENTION_DAYS)
             if _age_days(row.observed_at, now) < days:
+                result.disputed += 1
                 continue
 
             try:
@@ -257,6 +289,16 @@ async def reap_expired_transcripts(
             result.deleted += 1
             result.blobs_removed += int(removed)
             result.blobs_shared += int(shared)
+
+    # Recorded on every sweep, including the ones that delete nothing: a sweep with
+    # nothing due and a sweep that has stopped running produce identical counters.
+    record_retention_sweep(
+        "transcript",
+        deleted=result.deleted,
+        disputed=result.disputed,
+        failed=result.failed,
+        now=now,
+    )
 
     if result.deleted or result.failed:
         logger.info(
@@ -306,6 +348,7 @@ async def run_retention_loop(
             async with session_factory() as db:
                 await reap_expired_transcripts(db)
         except Exception:  # noqa: BLE001
+            record_retention_failure("transcript")
             logger.exception("transcript_retention.loop_error")
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)

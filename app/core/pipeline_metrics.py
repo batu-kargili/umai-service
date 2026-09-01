@@ -52,6 +52,11 @@ SIEM_OUTBOX_DEPTH = "umai_siem_outbox_depth"
 SIEM_OUTBOX_OLDEST_PENDING_AGE = "umai_siem_outbox_oldest_pending_age_seconds"
 SIEM_DELIVERY = "umai_siem_delivery_total"
 
+# Retention and cleanup
+RETENTION_DELETED = "umai_retention_deleted_total"
+RETENTION_SWEEPS = "umai_retention_sweeps_total"
+RETENTION_LAST_SUCCESS_AGE = "umai_retention_last_success_age_seconds"
+
 # Freshness
 LICENSE_EXPIRES_IN = "umai_license_expires_in_seconds"
 POLICY_SNAPSHOT_AGE = "umai_policy_snapshot_age_seconds"
@@ -85,6 +90,21 @@ registry.describe(
     "stops receiving findings while the platform looks healthy is the failure here.",
 )
 registry.describe(SIEM_DELIVERY, "SIEM delivery attempts by outcome.")
+registry.describe(
+    RETENTION_DELETED,
+    "Rows and blobs a retention sweep removed, by resource. 'disputed' counts rows the "
+    "query selected as expired that the age check disagreed with, which should be zero.",
+)
+registry.describe(
+    RETENTION_SWEEPS,
+    "Retention sweeps by resource and outcome. A sweep that stops running is the failure "
+    "mode here: nothing errors, storage simply grows and the retention promise lapses.",
+)
+registry.describe(
+    RETENTION_LAST_SUCCESS_AGE,
+    "Seconds since a retention sweep last completed, by resource. The one number that "
+    "distinguishes 'nothing was due for deletion' from 'the sweep is no longer running'.",
+)
 registry.describe(
     LICENSE_EXPIRES_IN,
     "Seconds until the licence expires. Negative once expired, so one alert covers both "
@@ -123,6 +143,51 @@ def record_siem_delivery(outcome: str, count: int = 1) -> None:
         registry.increment(SIEM_DELIVERY, {"outcome": outcome}, count)
 
 
+# When each resource's sweep last finished. Process-local, like every other gauge here:
+# the age is recomputed on sample, so a restarted process reports "never" rather than a
+# stale age it cannot substantiate.
+_last_retention_success: dict[str, dt.datetime] = {}
+
+
+def record_retention_sweep(
+    resource: str,
+    *,
+    deleted: int = 0,
+    disputed: int = 0,
+    failed: int = 0,
+    now: dt.datetime | None = None,
+) -> None:
+    """Record one completed sweep.
+
+    Called even when nothing was deleted. A sweep that finds nothing due and a sweep that
+    is no longer running produce identical counters, and only the completion timestamp
+    tells them apart — which is the whole reason retention lapses go unnoticed.
+    """
+    registry.increment(RETENTION_SWEEPS, {"resource": resource, "outcome": "ok"})
+    if failed:
+        registry.increment(RETENTION_SWEEPS, {"resource": resource, "outcome": "failed"}, failed)
+    if deleted:
+        registry.increment(RETENTION_DELETED, {"resource": resource}, deleted)
+    if disputed:
+        registry.increment(RETENTION_DELETED, {"resource": "disputed"}, disputed)
+    _last_retention_success[resource] = now or dt.datetime.now(dt.timezone.utc)
+
+
+def record_retention_failure(resource: str) -> None:
+    """A sweep that raised. The success timestamp is deliberately not advanced."""
+    registry.increment(RETENTION_SWEEPS, {"resource": resource, "outcome": "failed"})
+
+
+def reset_retention_state() -> None:
+    """Forget when each sweep last succeeded.
+
+    This lives outside the registry, so `registry.reset()` does not clear it — which
+    would otherwise leak one test's sweep into the next one's assertions about a sweep
+    that never ran.
+    """
+    _last_retention_success.clear()
+
+
 def _age_seconds(moment: dt.datetime, value: dt.datetime | None) -> float | None:
     if value is None:
         return None
@@ -147,6 +212,22 @@ async def sample_pipeline(
     await _sample_transcripts(session)
     await _sample_outbox(session, moment)
     await _sample_freshness(session, moment)
+    _sample_retention(moment)
+
+
+def _sample_retention(moment: dt.datetime) -> None:
+    """How long since each sweep last finished.
+
+    Only resources whose sweep has completed at least once in this process are reported.
+    Publishing a zero for a sweep that has never run would read as "just completed",
+    which is the opposite of the truth; absence is what the alert keys on instead.
+    """
+    for resource, at in _last_retention_success.items():
+        registry.set_gauge(
+            RETENTION_LAST_SUCCESS_AGE,
+            max(0.0, (moment - at).total_seconds()),
+            {"resource": resource},
+        )
 
 
 async def _sample_collectors(

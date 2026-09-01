@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     # enqueueing happens regardless, so nothing is lost while it is off.
     siem_drain_enabled: bool = False
     siem_drain_interval_seconds: float = 5.0
+    # How long a *delivered* outbox row is kept (UMA-93). A delivered row is a receipt:
+    # the finding itself lives in `findings`, so keeping the copy forever grew the
+    # fastest-growing table the platform owns for no recoverable value. Pending and
+    # dead-letter rows are never pruned — a dead letter is a finding the SOC has not
+    # seen. Set to 0 to keep everything, which is the pre-UMA-93 behaviour.
+    siem_outbox_retention_days: int = 7
+    siem_outbox_prune_interval_seconds: float = 60 * 60
     async_job_webhook_timeout_seconds: float = 5.0
     # Request limits (UMA-83). The rate and concurrency numbers are PER WORKER
     # PROCESS: there is no shared counter, so a deployment running N workers admits
