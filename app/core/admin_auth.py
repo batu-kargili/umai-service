@@ -13,6 +13,7 @@ from fastapi import Request
 
 from app.core.errors import ServiceError
 from app.core.settings import settings
+from app.core.token_audiences import NON_ADMIN_AUDIENCES
 
 logger = logging.getLogger("umai.service.admin_auth")
 
@@ -71,9 +72,36 @@ def _verify_hs256_jwt(token: str, secret: str) -> dict:
     except Exception as exc:
         raise ServiceError("TOKEN_INVALID", "JWT payload could not be decoded", 401) from exc
 
+    # An admin token must expire. Treating a missing `exp` as "no expiry" turns a
+    # mis-minted token into a permanent credential, which is worse than rejecting it.
     exp = payload.get("exp")
-    if exp is not None and time.time() > float(exp):
+    if exp is None:
+        raise ServiceError("TOKEN_INVALID", "Admin JWT must carry an exp claim", 401)
+    try:
+        expires_at = float(exp)
+    except (TypeError, ValueError) as exc:
+        raise ServiceError("TOKEN_INVALID", "Admin JWT exp claim is not numeric", 401) from exc
+    if time.time() > expires_at:
         raise ServiceError("TOKEN_EXPIRED", "JWT has expired", 401)
+
+    # Admin tokens come from the customer's identity provider, so the service cannot
+    # demand a specific audience without breaking existing issuers. It can, however,
+    # refuse a token that was plainly minted for another surface: a collector or device
+    # token is a structurally valid admin token whenever a deployment reuses one HS256
+    # secret across surfaces, and role naming should not be the only thing standing in
+    # the way. An operator who does control their issuer can set
+    # UMAI_ADMIN_JWT_AUDIENCE to require an exact match instead.
+    audience = payload.get("aud")
+    expected_audience = (settings.admin_jwt_audience or "").strip()
+    if expected_audience:
+        if audience != expected_audience:
+            raise ServiceError("TOKEN_INVALID", "Admin JWT audience mismatch", 401)
+    elif isinstance(audience, str) and audience in NON_ADMIN_AUDIENCES:
+        raise ServiceError(
+            "TOKEN_INVALID",
+            f"Token audience {audience!r} is not valid for admin access",
+            401,
+        )
 
     # Verify header algorithm
     try:

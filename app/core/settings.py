@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     siem_drain_interval_seconds: float = 5.0
     async_job_webhook_timeout_seconds: float = 5.0
     admin_jwt_hs256_secret: str | None = None
+    # Optional. When set, an admin JWT must carry exactly this audience. Left unset,
+    # the service only refuses audiences it knows belong to another surface.
+    admin_jwt_audience: str | None = None
     enforce_admin_jwt: bool = False
     admin_auth_mode: str | None = None
     extension_ingest_bearer_token: str | None = None

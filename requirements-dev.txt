@@ -1,3 +1,4 @@
--r requirements.txt
+# Test-only dependencies. Kept out of requirements.txt so they never enter a
+# release image, but locked with hashes because CI release gates run on them.
 pytest>=8.0.0
 aiosqlite>=0.20.0

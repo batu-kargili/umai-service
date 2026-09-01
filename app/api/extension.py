@@ -43,8 +43,10 @@ from app.models.public import ChatMessage, InputArtifact, InputPayload, PublicGu
 
 logger = logging.getLogger("umai.service.extension")
 
-DEVICE_TOKEN_AUDIENCE = "umai-ext-ingest"
-BOOTSTRAP_TOKEN_AUDIENCE = "umai-ext-bootstrap"
+from app.core.token_audiences import (  # noqa: E402  audiences live in one place
+    EXTENSION_BOOTSTRAP_TOKEN_AUDIENCE as BOOTSTRAP_TOKEN_AUDIENCE,
+    EXTENSION_DEVICE_TOKEN_AUDIENCE as DEVICE_TOKEN_AUDIENCE,
+)
 DEFAULT_POLICY_PACK = {
     "version": "default-local-allow",
     "default_action": "allow",

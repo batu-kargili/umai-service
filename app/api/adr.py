@@ -43,8 +43,10 @@ from app.models.db import (
 
 logger = logging.getLogger("umai.service.adr")
 
-ADR_DEVICE_TOKEN_AUDIENCE = "umai-adr-ingest"
-ADR_BOOTSTRAP_TOKEN_AUDIENCE = "umai-adr-bootstrap"
+from app.core.token_audiences import (  # noqa: E402  audiences live in one place
+    ADR_BOOTSTRAP_TOKEN_AUDIENCE,
+    ADR_DEVICE_TOKEN_AUDIENCE,
+)
 ADR_BOOTSTRAP_TTL_SECONDS = 15 * 60
 ADR_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS = 60
 ADR_BOOTSTRAP_RATE_LIMIT_MAX_ATTEMPTS = 10
