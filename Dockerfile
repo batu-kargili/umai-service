@@ -1,4 +1,5 @@
-FROM python:3.11.11-slim-bookworm
+ARG SOURCE_DATE_EPOCH
+FROM python:3.11.11-slim-bookworm@sha256:081075da77b2b55c23c088251026fb69a7b2bf92471e491ff5fd75c192fd38e5
 
 # ── OCI image labels ─────────────────────────────────────────────────────────
 LABEL org.opencontainers.image.title="UMAI Enterprise Service"
@@ -13,26 +14,30 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install ODBC driver (required for optional SQL Server database backend)
-RUN apt-get update \
+# Install ODBC driver (required for optional SQL Server database backend).
+# Debian packages come from the immutable snapshot paired with the base image;
+# the Microsoft package is versioned and content-addressed.
+RUN sed -i \
+        -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/20250407T000000Z|' \
+        -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/20250407T000000Z|' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
     && apt-get install -y --no-install-recommends \
-        curl \
-        gnupg \
-        ca-certificates \
-        unixodbc \
-        unixodbc-dev \
-        gcc \
-        g++ \
-    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
-        | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
-        > /etc/apt/sources.list.d/mssql-release.list \
-    && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
-    && rm -rf /var/lib/apt/lists/*
+        curl=7.88.1-10+deb12u12 \
+        ca-certificates=20230311 \
+        unixodbc=2.3.11-2+deb12u1 \
+    && curl -fsSL \
+        https://packages.microsoft.com/debian/12/prod/pool/main/m/msodbcsql18/msodbcsql18_18.6.2.1-1_amd64.deb \
+        -o /tmp/msodbcsql18.deb \
+    && echo '73438bb02bc26fb3d1c3d8cac36b3c26cb11629dbd0a3784990fc3235331b334  /tmp/msodbcsql18.deb' \
+        | sha256sum -c - \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends /tmp/msodbcsql18.deb \
+    && rm -f /tmp/msodbcsql18.deb \
+    && rm -rf /var/lib/apt/lists/* /var/log/apt/* /var/log/dpkg.log \
+        /var/cache/ldconfig/aux-cache
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-compile --require-hashes -r requirements.lock
 
 COPY app ./app
 COPY alembic.ini .
