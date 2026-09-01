@@ -84,6 +84,25 @@ class Settings(BaseSettings):
     siem_drain_enabled: bool = False
     siem_drain_interval_seconds: float = 5.0
     async_job_webhook_timeout_seconds: float = 5.0
+    # Request limits (UMA-83). The rate and concurrency numbers are PER WORKER
+    # PROCESS: there is no shared counter, so a deployment running N workers admits
+    # N times the configured rate. Fleet capacity is workers x limit.
+    request_limits_enabled: bool = True
+    # Collector and extension upload. High rate, large bodies: a fleet uploads often.
+    rate_limit_ingest_per_minute: int = 600
+    max_body_bytes_ingest: int = 32 * 1024 * 1024
+    max_concurrent_ingest: int = 32
+    # Enrolment issues credentials, so it is the tightest surface by a wide margin.
+    rate_limit_bootstrap_per_minute: int = 30
+    max_concurrent_bootstrap: int = 8
+    rate_limit_admin_per_minute: int = 600
+    max_concurrent_admin: int = 64
+    # The analysis worker polls, so its rate is higher than an operator's.
+    rate_limit_worker_per_minute: int = 1200
+    max_concurrent_worker: int = 32
+    rate_limit_public_per_minute: int = 1200
+    max_concurrent_public: int = 64
+    max_body_bytes_default: int = 1 * 1024 * 1024
     admin_jwt_hs256_secret: str | None = None
     # Optional. When set, an admin JWT must carry exactly this audience. Left unset,
     # the service only refuses audiences it knows belong to another surface.

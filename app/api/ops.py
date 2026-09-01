@@ -2,10 +2,11 @@ import logging
 
 import httpx
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import text
 
 from app.core.db import get_engine
+from app.core.metrics import registry
 from app.core.redis import get_redis
 from app.core.settings import settings
 
@@ -16,6 +17,16 @@ logger = logging.getLogger("umai.service.ops")
 @router.get("/healthz")
 async def healthz() -> dict:
     return {"status": "ok"}
+
+
+# Prometheus scrape target. Deliberately unauthenticated and never rate limited, the
+# same posture as the health endpoints: a scraper that gets throttled reports an
+# outage that is not happening. Expose it on the internal network only.
+@router.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
+async def metrics() -> PlainTextResponse:
+    return PlainTextResponse(
+        registry.render(), media_type="text/plain; version=0.0.4; charset=utf-8"
+    )
 
 
 async def _check_db() -> dict:

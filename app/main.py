@@ -28,6 +28,12 @@ from app.core.transcript_retention import run_retention_loop
 from app.api.public import router as public_router
 from app.core.errors import ServiceError
 from app.core.license import bootstrap_license
+from app.core.limits import (
+    RequestLimiter,
+    RequestLimitsMiddleware,
+    build_policies,
+    error_payload,
+)
 from app.core.logging import configure_logging, reset_request_id, set_request_id
 from app.core.runtime_validation import validate_service_runtime
 from app.core.settings import settings
@@ -97,6 +103,15 @@ def create_app() -> FastAPI:
     configure_logging()
     app = FastAPI(title=settings.service_name, lifespan=lifespan)
 
+    # Rate, body-size, and concurrency limits (UMA-83).
+    #
+    # Starlette's add_middleware inserts at the front, so the nesting ends up
+    # request-id -> CORS -> limits -> router. That is the order we want: a limit
+    # rejection still gets a request id to correlate on, and still gets CORS headers,
+    # so a browser caller sees the 429 or 413 instead of an opaque CORS failure. The
+    # limits still run before the router, so an oversized body never reaches a handler.
+    app.add_middleware(RequestLimitsMiddleware, limiter=RequestLimiter(build_policies()))
+
     # Allow configured frontends to call the API across origins.
     app.add_middleware(
         CORSMiddleware,
@@ -150,7 +165,7 @@ def create_app() -> FastAPI:
             exc.status_code,
             exc.message,
         )
-        return JSONResponse(status_code=exc.status_code, content={"error": exc.to_dict()})
+        return JSONResponse(status_code=exc.status_code, content=error_payload(exc))
 
     return app
 
