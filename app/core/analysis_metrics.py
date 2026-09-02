@@ -63,6 +63,11 @@ CLAIMED_STATUSES = {
 TERMINAL_STATUSES = {
     "analysis_failed": "failed",
 }
+# Reported separately from the queue so a metadata-mode tenant does not read as
+# a permanent backlog: these sessions were never queued and never will be.
+NOT_COLLECTED_STATUSES = {
+    "content_not_collected": "triage",
+}
 
 # Model names come from the worker's configuration, not from request data, so the set is
 # small — but it is still external input, so it is capped.
@@ -157,12 +162,19 @@ async def sample_queue(session: AsyncSession, now: dt.datetime | None = None) ->
         ).all()
     )
 
-    for status, stage in {**WAITING_STATUSES, **CLAIMED_STATUSES, **TERMINAL_STATUSES}.items():
+    for status, stage in {
+        **WAITING_STATUSES,
+        **CLAIMED_STATUSES,
+        **TERMINAL_STATUSES,
+        **NOT_COLLECTED_STATUSES,
+    }.items():
         state = (
             "waiting"
             if status in WAITING_STATUSES
             else "claimed"
             if status in CLAIMED_STATUSES
+            else "not_collected"
+            if status in NOT_COLLECTED_STATUSES
             else "failed"
         )
         registry.set_gauge(

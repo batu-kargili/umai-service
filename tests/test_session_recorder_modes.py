@@ -13,7 +13,10 @@ import uuid
 import pytest
 
 from app.core import finding_schema
-from app.core.session_recorder import record_agent_sessions
+from app.core.session_recorder import (
+    STATUS_CONTENT_NOT_COLLECTED,
+    record_agent_sessions,
+)
 from app.core.transcript_store import (
     get_transcript_store,
     reset_transcript_store,
@@ -147,3 +150,68 @@ class TestIdempotence:
 
         blob_digest, direct = asyncio.run(stored())
         assert metadata_digest == blob_digest == direct
+
+
+class TestOnlyAnalysableSessionsAreQueued:
+    """A session with no transcript must never enter the analysis queue.
+
+    Both stages start by fetching the transcript. Below `full_session` there is
+    none, so the fetch answers 404, the worker's batch loop leaves the lease to
+    expire, the session is reclaimed and it goes round again — forever, while
+    counting as queue depth the whole time. On a `metadata` tenant, which is
+    the schema default, that is every session ever ingested.
+    """
+
+    def test_full_session_still_queues_for_triage(self) -> None:
+        _result, row = _run(finding_schema.MODE_FULL_SESSION)
+        assert row["analysis_status"] == "ingested"
+
+    @pytest.mark.parametrize(
+        "mode", [finding_schema.MODE_POSTURE_ONLY, finding_schema.MODE_METADATA]
+    )
+    def test_content_free_modes_land_in_a_terminal_state(self, mode: str) -> None:
+        _result, row = _run(mode)
+
+        assert row["analysis_status"] == STATUS_CONTENT_NOT_COLLECTED
+        # Not `analysis_failed`: nothing failed. The tenant chose this, and an
+        # operator has to be able to tell a policy outcome from a malfunction.
+        assert row["analysis_status"] != "analysis_failed"
+
+    def test_a_grown_session_is_requeued_only_when_there_is_content(self) -> None:
+        """Re-ingest resets the status; it must not resurrect the loop."""
+
+        async def scenario():
+            async with db_session() as db:
+                await _ingest(db, finding_schema.MODE_METADATA)
+                bigger = {
+                    **SESSION,
+                    "chat_history": SESSION["chat_history"]
+                    + [{"role": "user", "content": "and one more thing"}],
+                }
+                await record_agent_sessions(
+                    db,
+                    tenant_id=TENANT,
+                    device_id="dev-1",
+                    collector={"name": "umai-adr-collector", "version": "0.4.0"},
+                    sessions=[bigger],
+                )
+                await db.commit()
+                return (await db.execute(AiSession.__table__.select())).mappings().one()
+
+        row = asyncio.run(scenario())
+
+        assert row["message_count"] == 3
+        assert row["analysis_status"] == STATUS_CONTENT_NOT_COLLECTED
+
+    def test_the_status_is_not_counted_as_a_waiting_queue(self) -> None:
+        from app.core.analysis_metrics import (
+            CLAIMED_STATUSES,
+            NOT_COLLECTED_STATUSES,
+            WAITING_STATUSES,
+        )
+
+        # A permanent, un-drainable backlog on the dashboard would train the
+        # operator to ignore the one gauge that says analysis is behind.
+        assert STATUS_CONTENT_NOT_COLLECTED not in WAITING_STATUSES
+        assert STATUS_CONTENT_NOT_COLLECTED not in CLAIMED_STATUSES
+        assert STATUS_CONTENT_NOT_COLLECTED in NOT_COLLECTED_STATUSES

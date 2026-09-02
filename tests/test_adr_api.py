@@ -345,3 +345,53 @@ def test_body_limit_and_bootstrap_rate_limit_are_explicit() -> None:
     with pytest.raises(ServiceError) as rate_error:
         adr._check_bootstrap_rate_limit(tenant_id, "127.0.0.1")
     assert rate_error.value.status_code == 429
+
+
+# The repetition interval registered by the shipped Windows installer,
+# `UMAI-ADR/Sensor/packaging/windows/Install-ScheduledTask.ps1`. The collector
+# heartbeats once per run, so every freshness number here is a multiple of it.
+COLLECTOR_TASK_INTERVAL_SECONDS = 15 * 60
+
+
+def test_freshness_thresholds_match_the_shipped_collector_schedule() -> None:
+    """A healthy fleet must not read as stale.
+
+    The default was 180s while the installed collector runs every 15 minutes,
+    so a correctly deployed device showed `stale` for twelve minutes out of
+    every fifteen and the fleet screen was red by default. The two numbers are
+    coupled — the heartbeat interval the server asks for is derived from the
+    staleness window — so they are asserted together.
+    """
+    default = type(settings)().adr_heartbeat_stale_seconds
+
+    assert default >= 3 * COLLECTOR_TASK_INTERVAL_SECONDS
+    assert default % COLLECTOR_TASK_INTERVAL_SECONDS == 0
+
+
+def test_heartbeat_asks_for_the_interval_the_collector_actually_runs_at() -> None:
+    async def scenario():
+        async with db_session() as db:
+            tenant_id, device_id, token = await enrolled_tenant(db)
+            return await adr.adr_heartbeat(
+                adr.AdrHeartbeatRequest(
+                    device_id=device_id,
+                    collector_version="1.0.0",
+                    supported_sources=["claude"],
+                    observed_sources=["claude"],
+                    status="healthy",
+                ),
+                authorization=f"Bearer {token}",
+                x_tenant_id=tenant_id,
+                x_device_id=device_id,
+                db=db,
+            )
+
+    with patched_settings(
+        adr_ingest_jwt_hs256_secret="adr-secret",
+        adr_heartbeat_stale_seconds=type(settings)().adr_heartbeat_stale_seconds,
+    ):
+        heartbeat = asyncio.run(scenario())
+
+    # Asking for a cadence the deployed collector cannot keep is the same bug
+    # from the other side: it would report healthy devices as late.
+    assert heartbeat.next_heartbeat_after_s == COLLECTOR_TASK_INTERVAL_SECONDS

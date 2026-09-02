@@ -27,6 +27,14 @@ from app.core.transcript_store import get_transcript_store, transcript_sha256
 from app.models.db import AiSession, Tenant
 
 
+# Terminal from the moment of ingest: the tenant's collection mode kept the
+# transcript off this machine, so there is nothing for either analysis stage to
+# read. Distinct from `analysis_failed`, which means the analysis was attempted
+# and did not happen — this one is a policy outcome, not a malfunction, and an
+# operator must be able to tell those apart at a glance.
+STATUS_CONTENT_NOT_COLLECTED = "content_not_collected"
+
+
 @dataclass
 class RecordResult:
     created: int = 0
@@ -173,12 +181,21 @@ async def record_agent_sessions(
             "updated_at": dt.datetime.now(dt.timezone.utc),
         }
 
+        # Only queue what a worker can actually act on. Both analysis stages
+        # read the transcript, and below `full_session` there is none — the
+        # worker's fetch answers 404, the batch loop leaves the lease to
+        # expire, the session is reclaimed, and it goes round again forever
+        # while counting as queue depth the whole time. That is not a backlog
+        # to drain, it is a tenant that chose not to collect content
+        # (contract: transcript-data-modes.md §3).
+        queue_status = "ingested" if ref else STATUS_CONTENT_NOT_COLLECTED
+
         if existing is None:
             db.add(
                 AiSession(
                     tenant_id=tenant_id,
                     session_key=key,
-                    analysis_status="ingested",
+                    analysis_status=queue_status,
                     **values,
                 )
             )
@@ -187,7 +204,7 @@ async def record_agent_sessions(
             for attribute, value in values.items():
                 setattr(existing, attribute, value)
             # Content changed — the session grew, so it needs analysing again.
-            existing.analysis_status = "ingested"
+            existing.analysis_status = queue_status
             existing.threat_tactic = None
             existing.verdict = None
             existing.confidence = None

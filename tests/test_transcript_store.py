@@ -155,3 +155,40 @@ class TestFactory:
         # Silently falling back would put transcripts somewhere nobody expects.
         with pytest.raises(RuntimeError, match="Unknown transcript_store_backend"):
             build_transcript_store("nfs")
+
+
+class TestImageOwnsTheVolumeMountPoint:
+    """The runtime user must be able to write the transcript volume.
+
+    Docker copies the image directory's ownership into an empty named volume on
+    first mount. With no such directory in the image it creates the mount point
+    as root:root, and the service — running as `umai`, under `read_only: true`,
+    `cap_drop: ALL` and `no-new-privileges` — can neither chown it nor be given
+    the capability to. Every `full_session` ingest then fails with
+    `PermissionError: /var/lib/umai/transcripts/<tenant>`, which is a 500 back
+    to the collector on a deployment where nothing is misconfigured.
+
+    Asserted against the Dockerfile because there is nowhere else to assert it:
+    the ownership can only be set at build time, above `USER umai`.
+    """
+
+    DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
+
+    def _lines(self) -> list[str]:
+        return self.DOCKERFILE.read_text(encoding="utf-8").splitlines()
+
+    def test_the_mount_point_is_created_and_owned_by_the_runtime_user(self) -> None:
+        body = "\n".join(self._lines())
+
+        assert "mkdir -p /var/lib/umai/transcripts" in body
+        assert "chown -R umai:umai /var/lib/umai" in body
+
+    def test_the_ownership_is_set_before_the_image_drops_privileges(self) -> None:
+        lines = self._lines()
+        chown_at = next(
+            i for i, line in enumerate(lines) if "chown -R umai:umai /var/lib/umai" in line
+        )
+        user_at = next(i for i, line in enumerate(lines) if line.strip() == "USER umai")
+
+        # After `USER umai` the RUN cannot chown anything it does not own.
+        assert chown_at < user_at

@@ -50,6 +50,18 @@ COPY docker-entrypoint.sh ./docker-entrypoint.sh
 RUN groupadd -r umai && useradd -r -g umai -d /app -s /sbin/nologin umai \
     && chown -R umai:umai /app \
     && chmod +x /app/docker-entrypoint.sh
+
+# The transcript volume's mount point must exist in the image, owned by the
+# runtime user. Docker copies the image directory's ownership into an empty
+# named volume on first mount; with no directory to copy from it creates the
+# mount point as root:root, and the service — running as umai, under
+# `read_only: true`, `cap_drop: ALL` and `no-new-privileges` — cannot chown it
+# at runtime and cannot be given the capability to. Every `full_session`
+# ingest then fails with `PermissionError: /var/lib/umai/transcripts/<tenant>`.
+# Keep this above `USER umai`: it is the only place the ownership can be set.
+RUN mkdir -p /var/lib/umai/transcripts \
+    && chown -R umai:umai /var/lib/umai
+
 USER umai
 
 EXPOSE 8080

@@ -12,7 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.adr import _audit_device_event, _load_metadata
+from app.api.adr import (
+    ADR_BOOTSTRAP_TTL_SECONDS,
+    _audit_device_event,
+    _build_adr_bootstrap_token_row,
+    _load_metadata,
+)
 from app.core.admin_auth import (
     AdminPrincipal,
     ensure_tenant_access,
@@ -73,6 +78,27 @@ class FleetPage(_Model):
 
 class RevokeRequest(_Model):
     reason: str = Field(min_length=3, max_length=500)
+
+
+class BootstrapTokenRequest(_Model):
+    # Binding the token to a device id is the stronger form: a leaked token is
+    # then useless anywhere else. It is optional because an operator enrolling
+    # a machine from the console does not always know the id the collector will
+    # derive for it.
+    device_id: str | None = Field(default=None, min_length=1, max_length=128)
+    expires_in_seconds: int = Field(
+        default=ADR_BOOTSTRAP_TTL_SECONDS, ge=300, le=24 * 60 * 60
+    )
+
+
+class BootstrapTokenResponse(_Model):
+    token: str
+    token_id: uuid.UUID
+    tenant_id: uuid.UUID
+    device_id: str | None = None
+    expires_at: dt.datetime
+    # Said plainly because the value is not recoverable: it is stored hashed.
+    note: str = "Single use. Shown once — it is stored hashed and cannot be retrieved again."
 
 
 def _access(principal: AdminPrincipal, tenant_id: uuid.UUID, *, write: bool = False) -> None:
@@ -194,6 +220,64 @@ async def get_fleet_device(
             )
             for event in events
         ],
+    )
+
+
+@fleet_admin_router.post("/bootstrap-tokens", response_model=BootstrapTokenResponse)
+async def issue_bootstrap_token(
+    payload: BootstrapTokenRequest,
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> BootstrapTokenResponse:
+    """Mint the single-use credential a collector needs for its first run.
+
+    Without this there is no way to enrol a device through the product: the
+    collector's whole identity chain starts at a bootstrap token, the token has
+    to exist as a hashed row before `POST /adr/bootstrap` will accept it, and
+    nothing but this endpoint creates that row. Enrolment was documented in the
+    installer guide and impossible to perform.
+
+    The plaintext token is returned exactly once. `adr_bootstrap_tokens` keeps
+    only its hash, along with who minted it and when — that row is the issuance
+    record, which is why an unbound token needs no separate device audit event.
+    """
+    _access(principal, x_tenant_id, write=True)
+    actor = principal.subject or "admin"
+
+    async with session.begin():
+        async with tenant_scope(session, str(x_tenant_id)):
+            tenant = await session.get(Tenant, x_tenant_id)
+            if tenant is None:
+                raise ServiceError("NOT_FOUND", "Tenant not found", 404)
+
+            token, row = _build_adr_bootstrap_token_row(
+                tenant_id=x_tenant_id,
+                expires_in_seconds=payload.expires_in_seconds,
+                device_id=payload.device_id,
+                created_by=actor,
+            )
+            session.add(row)
+
+            if payload.device_id:
+                # A token bound to a known device belongs in that device's
+                # timeline; an operator reading it should see the credential
+                # being issued next to the enrolment it produced.
+                _audit_device_event(
+                    session,
+                    tenant_id=x_tenant_id,
+                    device_id=payload.device_id,
+                    event_type="bootstrap_token_issued",
+                    actor=actor,
+                    detail={"token_id": str(row.id), "expires_at": row.expires_at.isoformat()},
+                )
+
+    return BootstrapTokenResponse(
+        token=token,
+        token_id=row.id,
+        tenant_id=x_tenant_id,
+        device_id=payload.device_id,
+        expires_at=row.expires_at,
     )
 
 

@@ -117,6 +117,14 @@ class DeleteTranscriptResponse(_BaseModel):
     deleted: bool
 
 
+class ReanalyzeResponse(_BaseModel):
+    session_key: str
+    analysis_status: str
+    # Carried back so the caller sees how many times this session has already
+    # been attempted without producing a verdict.
+    analysis_attempts: int
+
+
 async def _tenant_mode(session: AsyncSession, tenant_id: uuid.UUID) -> str:
     """The tenant's collection mode, defaulting to the most restrictive.
 
@@ -440,6 +448,63 @@ async def get_transcript_endpoint(
         tenant_id=x_tenant_id,
         session_key=session_key,
         actor=principal.subject or "unknown",
+    )
+
+
+@sessions_admin_router.post(
+    "/sessions/{session_key}/reanalyze", response_model=ReanalyzeResponse
+)
+async def reanalyze_session_endpoint(
+    session_key: str,
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> ReanalyzeResponse:
+    """Put a session that failed analysis back at the front of the queue.
+
+    `analysis_failed` is deliberately terminal — a permanently failing session
+    must not loop forever — but the operator still needs a way out. A wrong API
+    key, an expired quota or a provider outage parks real sessions as
+    unexamined, and once the cause is fixed there was nothing short of writing
+    SQL against `ai_sessions` to get them looked at.
+
+    Only `analysis_failed` is accepted. Requeuing a session that already has a
+    verdict would discard analysis somebody may have acted on, and requeuing
+    one mid-flight would duplicate work the lease is there to prevent.
+    """
+    ensure_tenant_access(principal, x_tenant_id)
+    require_any_admin_role(principal, "tenant-admin", "platform-admin")
+
+    async with session.begin():
+        async with tenant_scope(session, str(x_tenant_id)):
+            row = await session.get(AiSession, (x_tenant_id, session_key))
+            if row is None:
+                raise ServiceError("NOT_FOUND", "Session not found", 404)
+            if row.analysis_status != "analysis_failed":
+                raise ServiceError(
+                    "INVALID_REQUEST",
+                    f"Only a failed session can be requeued; this one is {row.analysis_status}",
+                    409,
+                )
+
+            attempts = row.analysis_attempts or 0
+            row.analysis_status = "ingested"
+            row.analysis_error = None
+            row.claimed_at = None
+            row.claimed_by = None
+            # `analysis_attempts` is deliberately not reset: it is the record of
+            # how many times this session has cost money without producing a
+            # verdict, and an operator requeuing the same session for the fifth
+            # time should be able to see that.
+            logger.info(
+                "analysis.requeued session=%s actor=%s attempts=%s",
+                session_key,
+                principal.subject or "unknown",
+                attempts,
+            )
+
+    return ReanalyzeResponse(
+        session_key=session_key, analysis_status="ingested", analysis_attempts=attempts
     )
 
 

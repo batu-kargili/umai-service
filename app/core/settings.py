@@ -141,7 +141,16 @@ class Settings(BaseSettings):
     adr_ingest_jwt_hs256_secret: str | None = None
     adr_ingest_jwt_hs256_secret_previous: str | None = None
     adr_device_token_ttl_seconds: int = 60 * 60 * 24
-    adr_heartbeat_stale_seconds: int = 180
+    # Three missed runs of the collector's scheduled task. The shipped Windows
+    # installer registers a 15-minute repetition
+    # (`UMAI-ADR/Sensor/packaging/windows/Install-ScheduledTask.ps1`), and the
+    # collector heartbeats once per run — so this has to be a multiple of that
+    # interval, not of anything else. At the old 180s a correctly installed,
+    # perfectly healthy device showed `stale` for twelve minutes out of every
+    # fifteen, which made the fleet screen red by default and the signal
+    # worthless. `POST /adr/heartbeat` derives the interval it asks for from
+    # this value (stale / 3), so the two cannot drift apart.
+    adr_heartbeat_stale_seconds: int = 45 * 60
     # UMAI: blob root for agent session transcripts (ai_sessions.transcript_ref)
     transcript_store_path: str = "./data/transcripts"
     # `filesystem` (default) or `s3`. The filesystem backend needs a persistent

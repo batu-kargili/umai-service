@@ -15,7 +15,12 @@ import uuid
 
 import pytest
 
-from app.api.sessions import load_session, load_transcript, query_sessions
+from app.api.sessions import (
+    load_session,
+    load_transcript,
+    query_sessions,
+    reanalyze_session_endpoint,
+)
 from app.core import finding_schema
 from app.core.admin_auth import AdminPrincipal
 from app.core.errors import ServiceError
@@ -454,3 +459,101 @@ class TestAccessControl:
         with pytest.raises(ServiceError) as exc:
             self._check(AdminPrincipal(tenant_id=TENANT, roles=[]), TENANT)
         assert exc.value.status_code == 403
+
+
+class TestRequeueAfterAFailedAnalysis:
+    """`analysis_failed` is terminal by design, but not a dead end.
+
+    A wrong key, an exhausted quota or a provider outage parks real sessions as
+    unexamined. Nothing must retry them on its own — a permanently failing
+    session would loop forever — but once the cause is fixed the operator needs
+    a way to get them looked at that is not raw SQL against `ai_sessions`.
+    """
+
+    ADMIN = AdminPrincipal(tenant_id=TENANT, roles=["tenant-admin"])
+    AUDITOR = AdminPrincipal(tenant_id=TENANT, roles=["tenant-auditor"])
+
+    def test_a_failed_session_goes_back_to_the_queue(self) -> None:
+        async def body():
+            async with db_session() as db:
+                await _tenant(db, TENANT, finding_schema.MODE_FULL_SESSION)
+                row = await _session(
+                    db, analysis_status="analysis_failed", verdict=None
+                )
+                row.analysis_error = "APIConnectionError: Connection error."
+                row.analysis_attempts = 2
+                row.claimed_by = "worker-7"
+                row.claimed_at = NOW
+                await db.commit()
+
+                response = await reanalyze_session_endpoint(
+                    "sess-1", db, TENANT, self.ADMIN
+                )
+                refreshed = await db.get(AiSession, (TENANT, "sess-1"))
+                return response, refreshed
+
+        response, refreshed = _run(body)
+
+        assert response.analysis_status == "ingested"
+        assert refreshed.analysis_status == "ingested"
+        assert refreshed.analysis_error is None
+        # A stale lease would keep the claim query from ever picking it up.
+        assert refreshed.claimed_by is None
+        assert refreshed.claimed_at is None
+        # Kept, not reset: the count is the record of what this session has
+        # already cost without producing a verdict.
+        assert refreshed.analysis_attempts == 2
+        assert response.analysis_attempts == 2
+
+    def test_a_session_with_a_verdict_is_refused(self) -> None:
+        async def body():
+            async with db_session() as db:
+                await _tenant(db, TENANT, finding_schema.MODE_FULL_SESSION)
+                await _session(db, analysis_status="analyzed", verdict="malicious")
+                await db.commit()
+                with pytest.raises(ServiceError) as raised:
+                    await reanalyze_session_endpoint("sess-1", db, TENANT, self.ADMIN)
+                return raised.value
+
+        error = _run(body)
+
+        # Requeuing would discard a verdict somebody may already have acted on.
+        assert error.status_code == 409
+
+    def test_a_session_being_analysed_right_now_is_refused(self) -> None:
+        async def body():
+            async with db_session() as db:
+                await _tenant(db, TENANT, finding_schema.MODE_FULL_SESSION)
+                await _session(db, analysis_status="reasoning", verdict=None)
+                await db.commit()
+                with pytest.raises(ServiceError) as raised:
+                    await reanalyze_session_endpoint("sess-1", db, TENANT, self.ADMIN)
+                return raised.value
+
+        assert _run(body).status_code == 409
+
+    def test_an_auditor_cannot_requeue(self) -> None:
+        async def body():
+            async with db_session() as db:
+                await _tenant(db, TENANT, finding_schema.MODE_FULL_SESSION)
+                await _session(db, analysis_status="analysis_failed", verdict=None)
+                await db.commit()
+                with pytest.raises(ServiceError) as raised:
+                    await reanalyze_session_endpoint("sess-1", db, TENANT, self.AUDITOR)
+                return raised.value
+
+        # Requeuing spends model budget; reading the queue does not.
+        assert _run(body).status_code == 403
+
+    def test_another_tenant_cannot_requeue(self) -> None:
+        async def body():
+            async with db_session() as db:
+                await _tenant(db, TENANT, finding_schema.MODE_FULL_SESSION)
+                await _session(db, analysis_status="analysis_failed", verdict=None)
+                await db.commit()
+                outsider = AdminPrincipal(tenant_id=OTHER_TENANT, roles=["tenant-admin"])
+                with pytest.raises(ServiceError) as raised:
+                    await reanalyze_session_endpoint("sess-1", db, TENANT, outsider)
+                return raised.value
+
+        assert _run(body).status_code in (403, 404)
