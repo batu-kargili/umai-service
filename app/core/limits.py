@@ -42,13 +42,28 @@ CLASS_WORKER = "worker"
 CLASS_PUBLIC = "public"
 CLASS_OPS = "ops"
 
+# The `/api` prefix is optional on purpose. Every router in this service mounts
+# under `/api/v1/...`, so patterns anchored at `^/v1/` matched nothing and every
+# request — ADR ingest, extension ingest, the analysis workers, the whole admin
+# API — fell through to `CLASS_PUBLIC`. That silently applied the 1 MB default
+# body cap instead of the 32 MB ingest cap, so the first run of a collector on a
+# real machine died with `BODY_TOO_LARGE ... for public requests` while the
+# contract advertised 32 MB, and the admin API ran on the public rate limit.
+#
+# Both forms are accepted rather than just the real one: a deployment behind a
+# proxy that strips `/api` presents `/v1/...` to this process, and that
+# arrangement is what the original patterns were written for.
 _ROUTE_CLASSES: tuple[tuple[re.Pattern[str], str], ...] = (
     # Ordered: the more specific bootstrap paths must win over the ingest prefixes.
-    (re.compile(r"^/v1/(adr|extension)/(bootstrap|enroll|register|token)"), CLASS_BOOTSTRAP),
-    (re.compile(r"^/v1/(adr|extension)/"), CLASS_INGEST),
-    (re.compile(r"^/v1/analysis/"), CLASS_WORKER),
+    (
+        re.compile(r"^(?:/api)?/v1/(adr|extension|ext)/(bootstrap|enroll|register|token)"),
+        CLASS_BOOTSTRAP,
+    ),
+    (re.compile(r"^(?:/api)?/v1/(adr|extension|ext)/"), CLASS_INGEST),
+    (re.compile(r"^(?:/api)?/v1/analysis/"), CLASS_WORKER),
+    (re.compile(r"^/internal/analysis/"), CLASS_WORKER),
     (re.compile(r"^/(healthz|readyz|livez|metrics)$"), CLASS_OPS),
-    (re.compile(r"^/v1/admin/"), CLASS_ADMIN),
+    (re.compile(r"^(?:/api)?/v1/admin/"), CLASS_ADMIN),
 )
 
 

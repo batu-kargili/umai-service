@@ -13,6 +13,7 @@ import json
 import pytest
 
 from app.core.errors import ServiceError
+from app.core import limits
 from app.core.limits import (
     CLASS_ADMIN,
     CLASS_BOOTSTRAP,
@@ -565,3 +566,74 @@ class TestMetricsRendering:
 
     def test_an_empty_registry_renders_nothing(self) -> None:
         assert registry.render() == ""
+
+
+class TestRoutesAreClassifiedAtTheirRealPaths:
+    """The patterns must match the paths this service actually mounts.
+
+    Every router mounts under `/api/v1/...`, and the class patterns were
+    anchored at `^/v1/`. Nothing matched, so ADR ingest, extension ingest, the
+    analysis workers and all 68 admin routes fell through to `CLASS_PUBLIC`.
+    That applied the 1 MB default body cap where the ADR contract advertises
+    32 MB — the first collector run against a real machine died with
+    `BODY_TOO_LARGE ... for public requests` — and ran the admin API on the
+    public rate limit and concurrency budget.
+
+    Asserted on literal paths copied from the OpenAPI document, because the
+    failure mode was a pattern that looked right in isolation.
+    """
+
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            # Ingest: the surface that carries session bodies.
+            ("/api/v1/adr/sessions", limits.CLASS_INGEST),
+            ("/api/v1/adr/heartbeat", limits.CLASS_INGEST),
+            ("/api/v1/adr/renew", limits.CLASS_INGEST),
+            ("/api/v1/ext/evaluate", limits.CLASS_INGEST),
+            ("/api/v1/ext/policy", limits.CLASS_INGEST),
+            # Enrolment is tighter than ingest and must win the ordering.
+            ("/api/v1/adr/bootstrap", limits.CLASS_BOOTSTRAP),
+            ("/api/v1/ext/bootstrap", limits.CLASS_BOOTSTRAP),
+            # Workers post results and pull transcripts; both need the big cap.
+            ("/internal/analysis/claim", limits.CLASS_WORKER),
+            ("/internal/analysis/result", limits.CLASS_WORKER),
+            ("/internal/analysis/transcript/t/s", limits.CLASS_WORKER),
+            # Admin.
+            ("/api/v1/admin/adr/devices", limits.CLASS_ADMIN),
+            ("/api/v1/admin/guardrails", limits.CLASS_ADMIN),
+            ("/api/v1/admin/evaluations", limits.CLASS_ADMIN),
+            # Ops.
+            ("/healthz", limits.CLASS_OPS),
+            ("/metrics", limits.CLASS_OPS),
+            # Genuinely public runtime surfaces stay public.
+            ("/api/v1/guardrails/gr-1/guard", limits.CLASS_PUBLIC),
+            ("/api/v1/agent-runs", limits.CLASS_PUBLIC),
+        ],
+    )
+    def test_real_mounted_paths(self, path: str, expected: str) -> None:
+        assert limits.classify(path) == expected
+
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("/v1/adr/sessions", limits.CLASS_INGEST),
+            ("/v1/adr/bootstrap", limits.CLASS_BOOTSTRAP),
+            ("/v1/admin/guardrails", limits.CLASS_ADMIN),
+        ],
+    )
+    def test_a_proxy_that_strips_the_api_prefix_still_classifies(
+        self, path: str, expected: str
+    ) -> None:
+        # A deployment fronted by a proxy that rewrites `/api/v1` to `/v1`
+        # presents the short form to this process; both must work.
+        assert limits.classify(path) == expected
+
+    def test_the_ingest_cap_is_the_contract_cap(self) -> None:
+        from app.api.adr import ADR_BODY_SIZE_LIMIT
+        from app.core.settings import Settings
+
+        # The collector is entitled to send what the contract promises. These
+        # two numbers drifting apart is what made a documented limit
+        # unreachable.
+        assert Settings().max_body_bytes_ingest == ADR_BODY_SIZE_LIMIT
