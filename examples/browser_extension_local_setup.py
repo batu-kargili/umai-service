@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import hmac
 import json
-import time
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -17,36 +13,6 @@ POC_SERVICE_BASE = "https://umai-service-mhkvrwuj2q-ey.a.run.app"
 POC_CONTROL_CENTER_ORIGIN = "https://umai-controlcenter-mhkvrwuj2q-ey.a.run.app"
 POC_CONSOLE_ORIGIN = "https://pocttconsole.umaisolutions.com"
 POC_CONSOLE_EXTENSION_API_BASE = f"{POC_CONSOLE_ORIGIN}/api/public"
-
-
-def _b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
-
-
-def build_extension_jwt(
-    *,
-    tenant_id: str,
-    secret: str,
-    audience: str,
-    roles: list[str],
-    subject: str,
-    ttl_seconds: int = 3600,
-) -> str:
-    header = {"alg": "HS256", "typ": "JWT"}
-    now = int(time.time())
-    payload = {
-        "sub": subject,
-        "tenant_id": tenant_id,
-        "aud": audience,
-        "iat": now,
-        "exp": now + ttl_seconds,
-        "roles": roles,
-    }
-    header_b64 = _b64url(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    payload_b64 = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
-    signature = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
-    return f"{header_b64}.{payload_b64}.{_b64url(signature)}"
 
 
 def post_json(
@@ -99,7 +65,11 @@ def main() -> int:
     parser.add_argument("--print-only", action="store_true")
     parser.add_argument("--evaluation-mode", choices=["local", "server"], default="server")
     parser.add_argument("--capture-mode", choices=["metadata_only", "full_content"], default="full_content")
-    parser.add_argument("--jwt-secret", default="local-extension-secret")
+    parser.add_argument(
+        "--jwt-secret",
+        default="local-extension-secret",
+        help="Deprecated and ignored: bootstrap tokens are now issued by the admin API.",
+    )
     parser.add_argument("--connect-origin", default=None)
     parser.add_argument("--device-token", default=None)
     parser.add_argument("--events-url", default=None)
@@ -145,14 +115,22 @@ def main() -> int:
             print(json.dumps(deploy_response, indent=2))
             return 1
 
-    bootstrap_token = build_extension_jwt(
-        tenant_id=args.tenant_id,
-        secret=args.jwt_secret,
-        audience="umai-ext-bootstrap",
-        roles=["tenant-bootstrap"],
-        subject="local-browser-bootstrap",
-    )
     bootstrap_url = f"{api_base}/ext/bootstrap"
+    bootstrap_token = "<issue via POST /api/v1/admin/extension/bootstrap-tokens>"
+    if not args.print_only and not direct_device_token and args.profile != "poc-console":
+        # Bootstrap tokens must be registered server-side (jti, expiry, use
+        # count), so a locally signed JWT is refused at /ext/bootstrap.
+        issue_url = f"{api_base.replace('/api/v1', '')}/api/v1/admin/extension/bootstrap-tokens"
+        issue_status, issued = post_json(
+            issue_url,
+            {"label": "local-browser-bootstrap", "max_uses": 5},
+            headers={"X-Tenant-Id": args.tenant_id},
+        )
+        if issue_status != 200:
+            print("Bootstrap token issue failed:")
+            print(json.dumps(issued, indent=2))
+            return 1
+        bootstrap_token = str(issued.get("token") or "")
     guardrail_query = {
         "environment_id": environment_id,
         "project_id": project_id,

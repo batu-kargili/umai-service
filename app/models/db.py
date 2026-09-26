@@ -350,6 +350,39 @@ class AdrBootstrapToken(Base):
     )
 
 
+class ExtensionBootstrapToken(Base):
+    """Issuance and use ledger for a browser-extension enrollment token.
+
+    Unlike the single-use ADR token, one of these sits in a fleet's managed
+    policy and enrolls many browsers, so it carries a use budget instead of a
+    `used_at`. The token itself is a signed JWT and is never stored; `jti` is
+    what ties a presented token to its row.
+    """
+
+    __tablename__ = "extension_bootstrap_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    jti: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(200))
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    max_uses: Mapped[int] = mapped_column(Integer, nullable=False)
+    use_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[str | None] = mapped_column(String(320))
+    revoke_reason: Mapped[str | None] = mapped_column(String(500))
+    created_by: Mapped[str | None] = mapped_column(String(320))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("CURRENT_TIMESTAMP")
+    )
+    last_used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("jti", name="uq_extension_bootstrap_tokens_jti"),
+        Index("ix_extension_bootstrap_tokens_tenant_created", "tenant_id", "created_at"),
+    )
+
+
 class AdrDeviceAuditEvent(Base):
     """Security-relevant lifecycle event for an ADR collector credential.
 

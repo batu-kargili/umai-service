@@ -135,6 +135,10 @@ class Settings(BaseSettings):
     extension_ingest_jwt_hs256_secret: str | None = None
     extension_ingest_jwt_hs256_secret_previous: str | None = None
     extension_device_token_ttl_seconds: int = 60 * 60 * 24 * 30
+    # Ceiling on an enrollment (bootstrap) token's lifetime, enforced both when one
+    # is minted and on the `exp - iat` of every token presented. It is the default
+    # lifetime too: a managed-policy token is normally rotated weekly.
+    extension_bootstrap_token_max_ttl_seconds: int = 60 * 60 * 24 * 7
     extension_policy_json: str | None = None
     extension_bootstrap_public_key_pem: str | None = None
     # ADR Collector authentication and fleet freshness.

@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, Header, Query, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.admin_auth import (
@@ -41,7 +41,13 @@ from app.core.secret_rotation import accepted
 from app.core.settings import settings
 from app.core.siem import emit_event
 from app.models.engine import EngineFlags, EngineRequest, EngineResponse
-from app.models.db import BrowserExtensionEvent, Guardrail, GuardrailVersion
+from app.models.db import (
+    BrowserExtensionEvent,
+    ExtensionBootstrapToken,
+    Guardrail,
+    GuardrailVersion,
+    Tenant,
+)
 from app.models.public import ChatMessage, InputArtifact, InputPayload, PublicGuardRequest
 
 logger = logging.getLogger("umai.service.extension")
@@ -201,6 +207,64 @@ class ExtensionBootstrapResponse(_BaseModel):
     audience: str = DEVICE_TOKEN_AUDIENCE
 
 
+EXTENSION_BOOTSTRAP_PATH = "/api/v1/ext/bootstrap"
+EXTENSION_BOOTSTRAP_DEFAULT_MAX_USES = 500
+EXTENSION_BOOTSTRAP_MAX_USES_LIMIT = 100_000
+
+
+class ExtensionBootstrapTokenRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Omitted means the configured ceiling (`extension_bootstrap_token_max_ttl_seconds`,
+    # 7 days by default); asking for more than the ceiling is refused, not clamped.
+    ttl_seconds: int | None = Field(default=None, ge=300)
+    # One token goes into a fleet's managed policy and enrolls every browser that
+    # policy reaches, so the budget is sized to the fleet, not to one device.
+    max_uses: int = Field(
+        default=EXTENSION_BOOTSTRAP_DEFAULT_MAX_USES,
+        ge=1,
+        le=EXTENSION_BOOTSTRAP_MAX_USES_LIMIT,
+    )
+    label: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ExtensionBootstrapTokenRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class ExtensionBootstrapTokenSummary(_BaseModel):
+    token_id: uuid.UUID
+    tenant_id: uuid.UUID
+    jti: str
+    label: str | None = None
+    status: str
+    expires_at: dt.datetime
+    max_uses: int
+    use_count: int
+    created_by: str | None = None
+    created_at: dt.datetime | None = None
+    last_used_at: dt.datetime | None = None
+    revoked_at: dt.datetime | None = None
+    revoked_by: str | None = None
+    revoke_reason: str | None = None
+
+
+class ExtensionBootstrapTokenIssueResponse(ExtensionBootstrapTokenSummary):
+    token: str
+    bootstrap_path: str = EXTENSION_BOOTSTRAP_PATH
+    # The managed-policy keys this token fills in. `bootstrapUrl` is left to the
+    # caller: the service does not know the public hostname browsers reach it on,
+    # and the extension rejects a relative URL.
+    managed_config: dict[str, str]
+    note: str = (
+        "Shown once. Set bootstrapUrl to https://<public host>" + EXTENSION_BOOTSTRAP_PATH
+        + " in the managed policy. The token cannot be retrieved again; revoke and"
+        " re-issue it instead."
+    )
+
+
 class ExtensionAttachment(_BaseModel):
     filename: str
     mime: str | None = None
@@ -337,7 +401,13 @@ def _verify_hs256_jwt(
         raise ServiceError("TOKEN_INVALID", "Unsupported extension token algorithm", 401)
 
     exp = payload.get("exp")
-    if exp is not None and time.time() > float(exp) + expiry_leeway_seconds:
+    if exp is not None:
+        try:
+            exp = float(exp)
+        except (TypeError, ValueError) as exc:
+            # Previously an unhandled ValueError, i.e. a 500 for a malformed token.
+            raise ServiceError("TOKEN_INVALID", "Extension token exp is not numeric", 401) from exc
+    if exp is not None and time.time() > exp + expiry_leeway_seconds:
         raise ServiceError("TOKEN_EXPIRED", "Extension token has expired", 401)
 
     token_audience = payload.get("aud")
@@ -398,10 +468,25 @@ def _authenticate_extension_request(
     )
 
 
-def _authenticate_extension_bootstrap_request(
+def _as_utc(value: dt.datetime) -> dt.datetime:
+    return value.replace(tzinfo=dt.timezone.utc) if value.tzinfo is None else value
+
+
+def _bootstrap_claims_error(message: str) -> ServiceError:
+    return ServiceError("EXTENSION_BOOTSTRAP_TOKEN_INVALID", message, 401)
+
+
+async def _authenticate_extension_bootstrap_request(
+    db: AsyncSession,
     authorization: str | None,
     tenant_id: uuid.UUID | None,
 ) -> ExtensionAuthPrincipal:
+    """Verify an enrollment token and spend one of its uses.
+
+    Must run inside the caller's transaction and tenant scope, together with the
+    device-token issuance it authorises: if issuance fails the use is rolled back
+    with it, and a use is never recorded for a device token nobody received.
+    """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise ServiceError("UNAUTHENTICATED", "Bearer token required for extension bootstrap", 401)
     if tenant_id is None:
@@ -419,19 +504,86 @@ def _authenticate_extension_bootstrap_request(
         )
 
     token = authorization.split(" ", 1)[1].strip()
-    payload = _verify_hs256_jwt(
-        token,
-        secret,
-        audience=BOOTSTRAP_TOKEN_AUDIENCE,
-        required_role="tenant-bootstrap",
-    )
+    try:
+        payload = _verify_hs256_jwt(
+            token,
+            secret,
+            audience=BOOTSTRAP_TOKEN_AUDIENCE,
+            required_role="tenant-bootstrap",
+        )
+    except ServiceError as exc:
+        if exc.error_type == "TOKEN_EXPIRED":
+            raise ServiceError(
+                "EXTENSION_BOOTSTRAP_TOKEN_EXPIRED", "Extension bootstrap token has expired", 401
+            ) from exc
+        if exc.error_type == "TOKEN_INVALID":
+            raise _bootstrap_claims_error(exc.message) from exc
+        raise
     try:
         token_tenant_id = uuid.UUID(str(payload.get("tenant_id")))
     except Exception as exc:
-        raise ServiceError("TOKEN_INVALID", "Extension bootstrap tenant_id is invalid", 401) from exc
+        raise _bootstrap_claims_error("Extension bootstrap tenant_id is invalid") from exc
 
     if tenant_id != token_tenant_id:
         raise ServiceError("FORBIDDEN", "Tenant header does not match bootstrap token", 403)
+
+    # `_verify_hs256_jwt` treats `exp` as optional, which for this token meant a
+    # credential that never expired and could be replayed forever. Every claim that
+    # bounds it is mandatory here.
+    exp, iat, jti = payload.get("exp"), payload.get("iat"), payload.get("jti")
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        raise _bootstrap_claims_error("Extension bootstrap token must carry exp")
+    if not isinstance(iat, (int, float)) or isinstance(iat, bool):
+        raise _bootstrap_claims_error("Extension bootstrap token must carry iat")
+    if not isinstance(jti, str) or not jti.strip():
+        raise _bootstrap_claims_error("Extension bootstrap token must carry jti")
+    max_ttl = int(settings.extension_bootstrap_token_max_ttl_seconds)
+    if exp - iat > max_ttl:
+        raise _bootstrap_claims_error(
+            f"Extension bootstrap token lifetime exceeds {max_ttl} seconds"
+        )
+
+    now = dt.datetime.now(dt.timezone.utc)
+    async with tenant_scope(db, str(token_tenant_id)):
+        row = (
+            await db.execute(
+                select(ExtensionBootstrapToken).where(
+                    ExtensionBootstrapToken.tenant_id == token_tenant_id,
+                    ExtensionBootstrapToken.jti == jti,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            # A correctly signed token with no row was minted outside the admin
+            # API — by hand with the shared secret, or before this ledger existed.
+            raise _bootstrap_claims_error("Extension bootstrap token is not registered")
+        if row.revoked_at is not None:
+            raise ServiceError(
+                "EXTENSION_BOOTSTRAP_TOKEN_REVOKED", "Extension bootstrap token has been revoked", 401
+            )
+        if _as_utc(row.expires_at) <= now:
+            raise ServiceError(
+                "EXTENSION_BOOTSTRAP_TOKEN_EXPIRED", "Extension bootstrap token has expired", 401
+            )
+
+        # The budget check and the increment are one statement, so two browsers
+        # enrolling at the same moment cannot both spend the last use.
+        spent = await db.execute(
+            update(ExtensionBootstrapToken)
+            .where(
+                ExtensionBootstrapToken.id == row.id,
+                ExtensionBootstrapToken.revoked_at.is_(None),
+                ExtensionBootstrapToken.use_count < ExtensionBootstrapToken.max_uses,
+            )
+            .values(use_count=ExtensionBootstrapToken.use_count + 1, last_used_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        if spent.rowcount != 1:
+            raise ServiceError(
+                "EXTENSION_BOOTSTRAP_TOKEN_EXHAUSTED",
+                "Extension bootstrap token has no uses left",
+                403,
+            )
 
     return ExtensionAuthPrincipal(
         tenant_id=token_tenant_id,
@@ -1087,28 +1239,37 @@ async def bootstrap_extension_device(
     payload: ExtensionBootstrapRequest,
     authorization: str | None = Header(default=None, alias="Authorization"),
     x_tenant_id: uuid.UUID | None = Header(default=None, alias="X-Tenant-Id"),
+    session: AsyncSession = Depends(get_session),
 ) -> ExtensionBootstrapResponse:
     requested_tenant_id = x_tenant_id or payload.tenant_id
-    principal = _authenticate_extension_bootstrap_request(authorization, requested_tenant_id)
-
-    if payload.tenant_id is not None and payload.tenant_id != principal.tenant_id:
+    # Checked before the token is looked at, so a malformed request never spends
+    # one of the enrollment token's uses.
+    if (
+        x_tenant_id is not None
+        and payload.tenant_id is not None
+        and payload.tenant_id != x_tenant_id
+    ):
         raise ServiceError("FORBIDDEN", "Payload tenant_id does not match bootstrap token", 403)
 
     device_id = (payload.device_id or "").strip()
     if not device_id:
         raise ServiceError("INVALID_REQUEST", "device_id is required", 422)
 
-    extension_id = (payload.extension_id or "").strip()
-    subject = (
-        f"extension:{extension_id}:{device_id}"
-        if extension_id
-        else (principal.subject or f"extension:{device_id}")
-    )
-    device_token, expires_at = _issue_extension_device_token(
-        tenant_id=principal.tenant_id,
-        device_id=device_id,
-        subject=subject,
-    )
+    async with session.begin():
+        principal = await _authenticate_extension_bootstrap_request(
+            session, authorization, requested_tenant_id
+        )
+        extension_id = (payload.extension_id or "").strip()
+        subject = (
+            f"extension:{extension_id}:{device_id}"
+            if extension_id
+            else (principal.subject or f"extension:{device_id}")
+        )
+        device_token, expires_at = _issue_extension_device_token(
+            tenant_id=principal.tenant_id,
+            device_id=device_id,
+            subject=subject,
+        )
     return ExtensionBootstrapResponse(
         tenant_id=principal.tenant_id,
         device_id=device_id,
@@ -1527,3 +1688,180 @@ async def get_extension_summary(
             rows = result.scalars().all()
 
     return _summarize_extension_rows(rows, days)
+
+
+def _bootstrap_token_status(row: ExtensionBootstrapToken, now: dt.datetime) -> str:
+    if row.revoked_at is not None:
+        return "revoked"
+    if _as_utc(row.expires_at) <= now:
+        return "expired"
+    if row.use_count >= row.max_uses:
+        return "exhausted"
+    return "active"
+
+
+def _bootstrap_token_summary(
+    row: ExtensionBootstrapToken, now: dt.datetime | None = None
+) -> ExtensionBootstrapTokenSummary:
+    return ExtensionBootstrapTokenSummary(
+        token_id=row.id,
+        tenant_id=row.tenant_id,
+        jti=row.jti,
+        label=row.label,
+        status=_bootstrap_token_status(row, now or dt.datetime.now(dt.timezone.utc)),
+        expires_at=row.expires_at,
+        max_uses=row.max_uses,
+        use_count=row.use_count,
+        created_by=row.created_by,
+        created_at=row.created_at,
+        last_used_at=row.last_used_at,
+        revoked_at=row.revoked_at,
+        revoked_by=row.revoked_by,
+        revoke_reason=row.revoke_reason,
+    )
+
+
+@ext_admin_router.post(
+    "/extension/bootstrap-tokens", response_model=ExtensionBootstrapTokenIssueResponse
+)
+async def issue_extension_bootstrap_token(
+    payload: ExtensionBootstrapTokenRequest,
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> ExtensionBootstrapTokenIssueResponse:
+    """Mint the enrollment token that goes into a fleet's managed browser policy.
+
+    The JWT is returned exactly once and is not stored. The row is the issuance
+    record — who minted it, when, for how long and for how many enrollments —
+    and is what `POST /ext/bootstrap` checks and spends on every use, which is
+    what makes the token revocable at all.
+    """
+    _require_tenant_access(principal, x_tenant_id, required_role="tenant-admin")
+    max_ttl = int(settings.extension_bootstrap_token_max_ttl_seconds)
+    ttl_seconds = payload.ttl_seconds or max_ttl
+    if ttl_seconds > max_ttl:
+        raise ServiceError(
+            "INVALID_REQUEST", f"ttl_seconds may not exceed {max_ttl}", 422
+        )
+    secret = (settings.extension_ingest_jwt_hs256_secret or "").strip()
+    if not secret:
+        raise ServiceError(
+            "AUTH_MISCONFIGURED",
+            "Extension ingest auth is not configured",
+            500,
+        )
+    actor = principal.subject or "admin"
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    expires_at = now + dt.timedelta(seconds=ttl_seconds)
+    jti = str(uuid.uuid4())
+
+    async with session.begin():
+        async with tenant_scope(session, str(x_tenant_id)):
+            if await session.get(Tenant, x_tenant_id) is None:
+                raise ServiceError("NOT_FOUND", "Tenant not found", 404)
+            row = ExtensionBootstrapToken(
+                tenant_id=x_tenant_id,
+                jti=jti,
+                label=payload.label,
+                expires_at=expires_at,
+                max_uses=payload.max_uses,
+                use_count=0,
+                created_by=actor,
+                created_at=now,
+            )
+            session.add(row)
+
+    token = _encode_hs256_jwt(
+        {
+            "sub": f"extension-bootstrap:{jti}",
+            "jti": jti,
+            "tenant_id": str(x_tenant_id),
+            "aud": BOOTSTRAP_TOKEN_AUDIENCE,
+            "iat": int(now.timestamp()),
+            "exp": int(expires_at.timestamp()),
+            "roles": ["tenant-bootstrap"],
+        },
+        secret,
+    )
+    logger.info(
+        "extension.bootstrap_token.issued tenant=%s token_id=%s max_uses=%s expires_at=%s actor=%s",
+        x_tenant_id,
+        row.id,
+        row.max_uses,
+        expires_at.isoformat(),
+        actor,
+    )
+    return ExtensionBootstrapTokenIssueResponse(
+        **_bootstrap_token_summary(row, now).model_dump(),
+        token=token,
+        managed_config={"tenantId": str(x_tenant_id), "bootstrapToken": token},
+    )
+
+
+@ext_admin_router.get(
+    "/extension/bootstrap-tokens", response_model=list[ExtensionBootstrapTokenSummary]
+)
+async def list_extension_bootstrap_tokens(
+    limit: int = Query(default=100, ge=1, le=500),
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> list[ExtensionBootstrapTokenSummary]:
+    _require_tenant_access(principal, x_tenant_id, required_role="tenant-auditor")
+    async with session.begin():
+        async with tenant_scope(session, str(x_tenant_id)):
+            rows = (
+                await session.execute(
+                    select(ExtensionBootstrapToken)
+                    .where(ExtensionBootstrapToken.tenant_id == x_tenant_id)
+                    .order_by(ExtensionBootstrapToken.created_at.desc())
+                    .limit(limit)
+                )
+            ).scalars().all()
+    now = dt.datetime.now(dt.timezone.utc)
+    return [_bootstrap_token_summary(row, now) for row in rows]
+
+
+@ext_admin_router.post(
+    "/extension/bootstrap-tokens/{token_id}/revoke",
+    response_model=ExtensionBootstrapTokenSummary,
+)
+async def revoke_extension_bootstrap_token(
+    token_id: uuid.UUID,
+    payload: ExtensionBootstrapTokenRevokeRequest,
+    session: AsyncSession = Depends(get_session),
+    x_tenant_id: uuid.UUID = Header(alias="X-Tenant-Id"),
+    principal: AdminPrincipal = Depends(get_admin_principal),
+) -> ExtensionBootstrapTokenSummary:
+    """Stop a token enrolling any further browsers.
+
+    Devices it already enrolled keep their device tokens until those expire;
+    revoking the enrollment credential is not revoking the fleet. Revoking twice
+    is a no-op and keeps the first revocation's record.
+    """
+    _require_tenant_access(principal, x_tenant_id, required_role="tenant-admin")
+    actor = principal.subject or "admin"
+    async with session.begin():
+        async with tenant_scope(session, str(x_tenant_id)):
+            row = (
+                await session.execute(
+                    select(ExtensionBootstrapToken).where(
+                        ExtensionBootstrapToken.tenant_id == x_tenant_id,
+                        ExtensionBootstrapToken.id == token_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                raise ServiceError("NOT_FOUND", "Extension bootstrap token not found", 404)
+            if row.revoked_at is None:
+                row.revoked_at = dt.datetime.now(dt.timezone.utc)
+                row.revoked_by = actor
+                row.revoke_reason = payload.reason
+                logger.info(
+                    "extension.bootstrap_token.revoked tenant=%s token_id=%s actor=%s",
+                    x_tenant_id,
+                    row.id,
+                    actor,
+                )
+    return _bootstrap_token_summary(row)
