@@ -160,7 +160,9 @@ The control center parses errors from any of these three shapes. Return one cons
 | POST   | `/guardrails`                                                 | `Content-Type`|                                   |
 | GET    | `/guardrails/{env_id}/{project_id}/{guardrail_id}/versions`   | `X-Tenant-Id` | Returns `GuardrailVersion[]`      |
 | POST   | `/guardrails/{guardrail_id}/versions`                         | `Content-Type`|                                   |
-| POST   | `/guardrails/{guardrail_id}/publish/{version}`                | `Content-Type`| Returns `{ redis_key: string }`   |
+| POST   | `/guardrails/{guardrail_id}/publish/{version}`                | `Content-Type`| Returns `PublishResponse`; eval-gated, see below |
+| GET    | `/guardrails/{env_id}/{project_id}/{guardrail_id}/publish-gate` | `X-Tenant-Id` | Effective gate thresholds (tenant row, else defaults) |
+| PUT    | `/guardrails/{env_id}/{project_id}/{guardrail_id}/publish-gate` | `Content-Type`| Store tenant thresholds for this guardrail |
 | GET    | `/guardrails/{env_id}/{project_id}/{guardrail_id}/snapshot/{version}` | `X-Tenant-Id` | Returns `GuardrailSnapshotResponse` |
 | POST   | `/guardrails/agentic`                                         | `Content-Type`, `X-Tenant-Id` | AI-generated guardrail draft |
 
@@ -211,6 +213,34 @@ The control center parses errors from any of these three shapes. Return one cons
   }
 }
 ```
+
+**Publishing and the eval gate.** `POST /guardrails/{guardrail_id}/publish/{version}` takes
+`{ tenant_id, environment_id, project_id, publisher_id?, approver_id?, bypass_eval_gate?, bypass_reason?, break_glass_reason? }`.
+
+- The version needs a `COMPLETED` evaluation run (`POST /evaluations` with that
+  `guardrail_version`). The **latest** completed run for that exact version must have at least
+  `min_eval_cases` cases, meet `min_expected_action_accuracy` / `min_expected_allowed_accuracy`
+  (a run without labelled cases cannot meet a threshold), and stay under `max_p95_latency_ms`
+  when one is set. Thresholds come from the `publish-gate` row, else from
+  `UMAI_PUBLISH_GATE_*` settings (defaults: 10 cases, action accuracy 0.7).
+- Otherwise: `409 EVAL_GATE_NOT_MET`, with `error.details.failed_checks`
+  (`eval_run`, `min_eval_cases`, `min_expected_action_accuracy`, `min_expected_allowed_accuracy`,
+  `max_p95_latency_ms`, each with `required` and `actual`).
+- `bypass_eval_gate: true` publishes anyway; it needs a non-empty `bypass_reason`
+  (`422 BYPASS_REASON_REQUIRED`) unless `UMAI_PUBLISH_GATE_REQUIRE_BYPASS_REASON=false`.
+  `break_glass_reason` counts as a bypass with that reason.
+- Re-publishing the version that is already live (it is `current_version` and its snapshot is in
+  Redis) skips the gate.
+- Four-eyes: when the version has `created_by`, a non-break-glass publish needs an `approver_id`
+  (`422 APPROVER_REQUIRED`) different from `created_by` (`409 FOUR_EYES_REQUIRED`).
+- `PublishResponse`: `{ redis_key, signature, key_id, eval_gate }`, where
+  `eval_gate = { status: passed|bypassed|skipped, reason, bypass_kind, run_id, failed_checks }`.
+  The `umai.admin.publish.v1` SIEM event carries the same as flat `eval_gate_*` fields.
+- Library deploys (`publish: true`) and the auto-published first version skip the gate and say so
+  (`eval_gate.reason` = `library_deploy_exempt` / `first_version_exempt`, also on the SIEM
+  event). With `UMAI_PUBLISH_GATE_ENFORCE_ON_LIBRARY_DEPLOY=true`, a library deploy with
+  `publish: true` is rejected with `409` and a first version is created unpublished
+  (`auto_published: false`). `UMAI_PUBLISH_GATE_ENFORCED=false` turns the gate off everywhere.
 
 ---
 

@@ -75,6 +75,15 @@ class Settings(BaseSettings):
     publish_gate_min_eval_cases: int = 10
     publish_gate_max_p95_latency_ms: float | None = None
     publish_gate_require_bypass_reason: bool = True
+    # Eval gate on POST /guardrails/{id}/publish/{version} (go-live decision D4):
+    # a version needs a COMPLETED evaluation run that meets the thresholds above,
+    # or an explicit bypass with a reason. False turns the gate off everywhere.
+    publish_gate_enforced: bool = True
+    # Library-template deploys and the auto-published first version are exempt by
+    # default (there can be no eval run before the guardrail exists). True applies
+    # the gate to them too: a library deploy with publish=true is rejected and the
+    # first version is created as an unpublished draft.
+    publish_gate_enforce_on_library_deploy: bool = False
     evaluation_timeout_ms: int = 10000
     siem_endpoints_json: str | None = None
     siem_max_retries: int = 3

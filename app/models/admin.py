@@ -272,6 +272,9 @@ class GuardrailVersionResponse(BaseModel):
     approved_by: str | None = None
     approved_at: dt.datetime | None = None
     signature_present: bool = False
+    # Set only by the create call: whether this first version went live on creation.
+    auto_published: bool | None = None
+    eval_gate: dict | None = None
 
 
 class PublishRequest(BaseModel):
@@ -289,6 +292,9 @@ class PublishResponse(BaseModel):
     redis_key: str
     signature: str | None = None
     key_id: str | None = None
+    # What the publish eval gate decided: status passed|bypassed|skipped, reason,
+    # bypass_kind, run_id, failed_checks.
+    eval_gate: dict | None = None
 
 
 class PolicyLibraryItem(BaseModel):
@@ -359,6 +365,7 @@ class GuardrailLibraryDeployResponse(BaseModel):
     policy_ids: list[str]
     published: bool = False
     redis_key: str | None = None
+    eval_gate: dict | None = None
 
 
 class AgenticGuardrailRequest(BaseModel):

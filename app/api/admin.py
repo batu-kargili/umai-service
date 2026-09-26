@@ -22,7 +22,13 @@ from app.core.admin_auth import (
     require_admin_role,
 )
 from app.core.agent_mesh import hash_secret
-from app.core.eval_gate import resolve_publish_gate
+from app.core.eval_gate import (
+    PublishGateDecision,
+    enforce_publish_gate,
+    resolve_publish_gate,
+    skipped_gate,
+    validate_bypass_request,
+)
 from app.core.agentic_builder import generate_agentic_guardrail
 from app.core.policy_drafter import generate_policy_draft
 from app.core.auth import hash_api_key
@@ -614,6 +620,57 @@ def _approval_to_response(approval: ApprovalRequest) -> admin_models.ApprovalRes
         created_at=approval.created_at,
         resolved_at=approval.resolved_at,
         resolved_by=approval.resolved_by,
+    )
+
+
+def _eval_gate_event_fields(decision: PublishGateDecision) -> dict:
+    """Flat eval-gate fields for ``umai.admin.publish.v1`` (LEEF/CEF need scalars)."""
+    return {
+        "eval_gate_status": decision.status,
+        "eval_gate_bypassed": decision.bypassed,
+        "eval_gate_bypass_kind": decision.bypass_kind,
+        "eval_gate_reason": decision.reason,
+        "eval_gate_run_id": decision.run_id,
+        "eval_gate_failed_checks": ",".join(
+            str(item.get("check")) for item in decision.failed_checks
+        )
+        or None,
+    }
+
+
+def _emit_exempt_publish_event(
+    *,
+    tenant_id: uuid.UUID,
+    environment_id: str,
+    project_id: str,
+    guardrail_id: str,
+    version: int,
+    actor_id: str | None,
+    approver_id: str | None,
+    key_id: str | None,
+    decision: PublishGateDecision,
+) -> None:
+    """Publish event for the paths that go live without the explicit endpoint."""
+    published_at = dt.datetime.now(dt.timezone.utc)
+    asyncio.create_task(
+        emit_event(
+            {
+                "schema": "umai.admin.publish.v1",
+                "ts": published_at.timestamp(),
+                "occurred_at": published_at.isoformat(),
+                "tenant_id": str(tenant_id),
+                "environment_id": environment_id,
+                "project_id": project_id,
+                "guardrail_id": guardrail_id,
+                "guardrail_version": version,
+                "actor_id": actor_id,
+                "approver_id": approver_id,
+                "break_glass": False,
+                "break_glass_reason": None,
+                "key_id": key_id,
+                **_eval_gate_event_fields(decision),
+            }
+        )
     )
 
 
@@ -2008,7 +2065,19 @@ async def deploy_guardrail_library(
                 approved_at=dt.datetime.now(dt.timezone.utc),
             )
             session.add(version_row)
+            gate_decision: PublishGateDecision | None = None
             if payload.publish:
+                if settings.publish_gate_enforce_on_library_deploy:
+                    gate_decision = await enforce_publish_gate(
+                        session,
+                        tenant_id=payload.tenant_id,
+                        environment_id=payload.environment_id,
+                        project_id=payload.project_id,
+                        guardrail_id=guardrail_id,
+                        version=version,
+                    )
+                else:
+                    gate_decision = skipped_gate("library_deploy_exempt")
                 try:
                     redis = get_redis()
                 except RuntimeError as exc:
@@ -2027,13 +2096,28 @@ async def deploy_guardrail_library(
                 )
                 published = True
     logger.info(
-        "admin.guardrail_library.deployed tenant_id=%s env=%s project=%s guardrail_id=%s template_id=%s",
+        "admin.guardrail_library.deployed tenant_id=%s env=%s project=%s guardrail_id=%s template_id=%s published=%s eval_gate=%s eval_gate_reason=%s",
         payload.tenant_id,
         payload.environment_id,
         payload.project_id,
         guardrail_id,
         payload.template_id,
+        published,
+        gate_decision.status if gate_decision else None,
+        gate_decision.reason if gate_decision else None,
     )
+    if published and gate_decision is not None:
+        _emit_exempt_publish_event(
+            tenant_id=payload.tenant_id,
+            environment_id=payload.environment_id,
+            project_id=payload.project_id,
+            guardrail_id=guardrail_id,
+            version=version,
+            actor_id=principal.subject,
+            approver_id="library",
+            key_id=version_row.key_id,
+            decision=gate_decision,
+        )
     return admin_models.GuardrailLibraryDeployResponse(
         guardrail=admin_models.GuardrailResponse(
             tenant_id=payload.tenant_id,
@@ -2059,6 +2143,7 @@ async def deploy_guardrail_library(
         policy_ids=policy_ids,
         published=published,
         redis_key=redis_key,
+        eval_gate=gate_decision.to_event() if gate_decision else None,
     )
 
 
@@ -2223,6 +2308,7 @@ async def create_guardrail_version(
             422,
         )
     auto_published = False
+    gate_decision: PublishGateDecision | None = None
     redis_key: str | None = None
     try:
         async with session.begin():
@@ -2389,7 +2475,15 @@ async def create_guardrail_version(
                     created_by=payload.created_by,
                 )
                 session.add(version_row)
-                if not has_existing_versions:
+                if not has_existing_versions and (
+                    settings.publish_gate_enforced
+                    and settings.publish_gate_enforce_on_library_deploy
+                ):
+                    # The gate covers first versions too, and a brand-new version
+                    # cannot have an eval run yet: leave it as an unpublished draft.
+                    gate_decision = skipped_gate("first_version_left_unpublished")
+                elif not has_existing_versions:
+                    gate_decision = skipped_gate("first_version_exempt")
                     try:
                         redis = get_redis()
                     except RuntimeError as exc:
@@ -2427,15 +2521,38 @@ async def create_guardrail_version(
         guardrail_id,
         payload.version,
     )
-    if auto_published:
+    if auto_published and gate_decision is not None:
         logger.info(
-            "admin.guardrail_version.published tenant_id=%s env=%s project=%s guardrail_id=%s version=%s redis_key=%s",
+            "admin.guardrail_version.published tenant_id=%s env=%s project=%s guardrail_id=%s version=%s redis_key=%s eval_gate=%s eval_gate_reason=%s",
             payload.tenant_id,
             payload.environment_id,
             payload.project_id,
             guardrail_id,
             payload.version,
             redis_key,
+            gate_decision.status,
+            gate_decision.reason,
+        )
+        _emit_exempt_publish_event(
+            tenant_id=payload.tenant_id,
+            environment_id=payload.environment_id,
+            project_id=payload.project_id,
+            guardrail_id=guardrail_id,
+            version=payload.version,
+            actor_id=principal.subject,
+            approver_id=version_row.approved_by,
+            key_id=version_row.key_id,
+            decision=gate_decision,
+        )
+    elif gate_decision is not None:
+        logger.info(
+            "admin.guardrail_version.first_version_not_published tenant_id=%s env=%s project=%s guardrail_id=%s version=%s reason=%s",
+            payload.tenant_id,
+            payload.environment_id,
+            payload.project_id,
+            guardrail_id,
+            payload.version,
+            gate_decision.reason,
         )
     return admin_models.GuardrailVersionResponse(
         tenant_id=payload.tenant_id,
@@ -2448,6 +2565,8 @@ async def create_guardrail_version(
         approved_by=version_row.approved_by,
         approved_at=version_row.approved_at,
         signature_present=bool(version_row.signature),
+        auto_published=auto_published,
+        eval_gate=gate_decision.to_event() if gate_decision else None,
     )
 
 
@@ -2525,6 +2644,35 @@ async def publish_guardrail_version(
             )
             if guardrail is None:
                 raise ServiceError("GUARDRAIL_NOT_FOUND", "Guardrail not found", 404)
+            key = build_snapshot_key(
+                str(payload.tenant_id),
+                payload.environment_id,
+                payload.project_id,
+                guardrail_id,
+                version,
+            )
+            if guardrail.current_version == version and await redis.exists(key):
+                # Re-publishing the version that is already live pushes the same
+                # signed snapshot again; it cannot change what is enforced. The
+                # Control Center does this right after the auto-published v1.
+                validate_bypass_request(
+                    payload.bypass_eval_gate,
+                    payload.bypass_reason,
+                    payload.break_glass_reason,
+                )
+                gate_decision = skipped_gate("already_live_version")
+            else:
+                gate_decision = await enforce_publish_gate(
+                    session,
+                    tenant_id=payload.tenant_id,
+                    environment_id=payload.environment_id,
+                    project_id=payload.project_id,
+                    guardrail_id=guardrail_id,
+                    version=version,
+                    bypass_eval_gate=payload.bypass_eval_gate,
+                    bypass_reason=payload.bypass_reason,
+                    break_glass_reason=payload.break_glass_reason,
+                )
             guardrail.current_version = version
             snapshot_payload = json.loads(version_row.snapshot_json)
             if not version_row.signature:
@@ -2533,25 +2681,20 @@ async def publish_guardrail_version(
                 version_row.key_id = computed_key_id
             signature = version_row.signature
             key_id = version_row.key_id
-            key = build_snapshot_key(
-                str(payload.tenant_id),
-                payload.environment_id,
-                payload.project_id,
-                guardrail_id,
-                version,
-            )
             await publish_snapshot(
                 redis,
                 key,
                 pack_snapshot_record(snapshot_payload, signature, key_id),
             )
     logger.info(
-        "admin.guardrail_version.published tenant_id=%s env=%s project=%s guardrail_id=%s version=%s",
+        "admin.guardrail_version.published tenant_id=%s env=%s project=%s guardrail_id=%s version=%s eval_gate=%s eval_gate_reason=%s",
         payload.tenant_id,
         payload.environment_id,
         payload.project_id,
         guardrail_id,
         version,
+        gate_decision.status,
+        gate_decision.reason,
     )
     published_at = dt.datetime.now(dt.timezone.utc)
     asyncio.create_task(
@@ -2570,10 +2713,16 @@ async def publish_guardrail_version(
                 "break_glass": bool(payload.break_glass_reason),
                 "break_glass_reason": payload.break_glass_reason,
                 "key_id": key_id,
+                **_eval_gate_event_fields(gate_decision),
             }
         )
     )
-    return admin_models.PublishResponse(redis_key=key, signature=signature, key_id=key_id)
+    return admin_models.PublishResponse(
+        redis_key=key,
+        signature=signature,
+        key_id=key_id,
+        eval_gate=gate_decision.to_event(),
+    )
 
 
 @router.get("/approvals", response_model=list[admin_models.ApprovalResponse])
