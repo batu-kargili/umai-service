@@ -5,6 +5,7 @@ import os
 
 from sqlalchemy.engine import make_url
 
+from app.core.extension_policy import ExtensionPolicyError, parse_extension_policy_pack
 from app.core.settings import settings
 
 logger = logging.getLogger("umai.service.runtime")
@@ -217,6 +218,19 @@ def validate_service_runtime() -> None:
             "UMAI_SNAPSHOT_SIGNING_KEY is not set - "
             "published guardrail snapshots will be unsigned"
         )
+
+    extension_policy_raw = (settings.extension_policy_json or "").strip()
+    if extension_policy_raw:
+        try:
+            parse_extension_policy_pack(extension_policy_raw)
+        except ExtensionPolicyError as exc:
+            message = (
+                f"UMAI_EXTENSION_POLICY_JSON is set but invalid: {exc} - "
+                "/api/v1/ext/policy would serve allow-all"
+            )
+            if production:
+                raise RuntimeError(message) from exc
+            warnings.append(message)
 
     license_token = os.getenv("UMAI_LICENSE_TOKEN", "").strip()
     license_public_key = os.getenv("UMAI_LICENSE_PUBLIC_KEY", "").strip()
