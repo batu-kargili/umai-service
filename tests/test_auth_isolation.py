@@ -409,6 +409,34 @@ class TestTokenTypeConfusion:
             )
         assert caught.value.status_code == 401
 
+    @pytest.mark.parametrize(
+        ("audience", "role"),
+        [
+            (EXTENSION_DEVICE_TOKEN_AUDIENCE, "tenant-device"),
+            (ADR_BOOTSTRAP_TOKEN_AUDIENCE, "tenant-bootstrap"),
+            # The right audience signed with the shared secret is still refused:
+            # without a ledger row (WS2.3) it was not issued by the admin API.
+            (EXTENSION_BOOTSTRAP_TOKEN_AUDIENCE, "tenant-bootstrap"),
+        ],
+    )
+    def test_only_an_issued_extension_bootstrap_token_enrolls_a_browser(
+        self, audience: str, role: str
+    ) -> None:
+        token = surface_token(audience, role, jti=str(uuid.uuid4()))
+
+        async def run() -> None:
+            async with db_session() as db:
+                with pytest.raises(ServiceError) as caught:
+                    await extension.bootstrap_extension_device(
+                        extension.ExtensionBootstrapRequest(device_id="browser-a"),
+                        authorization=f"Bearer {token}",
+                        x_tenant_id=TENANT_A,
+                        session=db,
+                    )
+                assert caught.value.status_code == 401
+
+        asyncio.run(run())
+
     def test_the_right_audience_with_the_wrong_role_is_refused(self) -> None:
         token = surface_token(ADR_DEVICE_TOKEN_AUDIENCE, "tenant-auditor")
         with pytest.raises(ServiceError) as caught:

@@ -335,6 +335,17 @@ The control center parses errors from any of these three shapes. Return one cons
 |--------|-------------------------|---------------|----------------------------------------------------|
 | GET    | `/extension/events`     | `X-Tenant-Id` | Query: `?site=&event_type=&decision=&device_id=&chain_valid=&from_ts=&to_ts=&limit=` |
 | GET    | `/extension/summary`    | `X-Tenant-Id` | Query: `?days=7`. Returns `ExtensionSummary`       |
+| POST   | `/extension/bootstrap-tokens` | `X-Tenant-Id` | `tenant-admin`. Body: `{ ttl_seconds?, max_uses?, label? }` (defaults: 7 days, which is also the ceiling set by `UMAI_EXTENSION_BOOTSTRAP_TOKEN_MAX_TTL_SECONDS`; 500 uses, max 100000). Returns the enrollment JWT **once**, plus `token_id`, `expires_at`, `max_uses`, `bootstrap_path` and `managed_config` (`tenantId`, `bootstrapToken`) |
+| GET    | `/extension/bootstrap-tokens` | `X-Tenant-Id` | `tenant-auditor`. Query: `?limit=`. Ledger rows with `status` (`active`/`expired`/`exhausted`/`revoked`) and `use_count`; never the token |
+| POST   | `/extension/bootstrap-tokens/{token_id}/revoke` | `X-Tenant-Id` | `tenant-admin`. Body: `{ reason }`. Idempotent. Browsers already enrolled keep their device tokens |
+
+**Enrollment (bootstrap) tokens.** `POST /api/v1/ext/bootstrap` only accepts a token
+issued by the endpoint above. It must carry `exp`, `iat` and `jti`, with
+`exp - iat` within the ceiling; its `jti` row must exist for the token's tenant and be
+unrevoked, unexpired and under `max_uses`. Each successful enrollment spends one use.
+Errors: `EXTENSION_BOOTSTRAP_TOKEN_INVALID` / `_EXPIRED` / `_REVOKED` (401),
+`EXTENSION_BOOTSTRAP_TOKEN_EXHAUSTED` (403), tenant mismatch `FORBIDDEN` (403). Tokens
+signed by hand with the shared ingest secret no longer work.
 
 **ExtensionSummary object:**
 ```json
