@@ -32,6 +32,7 @@ from app.core.db import get_session, tenant_scope
 from app.core.engine_client import evaluate_engine
 from app.core.errors import ServiceError
 from app.core.events import record_audit_event
+from app.core.extension_policy import ExtensionPolicyError, parse_extension_policy_pack
 from app.core.file_inspection import extract_attachment_text
 from app.core.library import get_guardrail_template
 from app.core.license import license_allows_llm_calls, require_active_license
@@ -538,20 +539,12 @@ def _load_policy_pack() -> dict[str, Any]:
     if not raw:
         return DEFAULT_POLICY_PACK
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("extension.policy.invalid_json")
+        return parse_extension_policy_pack(raw)
+    except ExtensionPolicyError as exc:
+        # Production refuses to start with an invalid pack (runtime_validation);
+        # this fallback is only reachable in development.
+        logger.warning("extension.policy.invalid reason=%s", exc)
         return DEFAULT_POLICY_PACK
-    if not isinstance(parsed, dict):
-        logger.warning("extension.policy.invalid_shape type=%s", type(parsed).__name__)
-        return DEFAULT_POLICY_PACK
-    version = parsed.get("version")
-    default_action = parsed.get("default_action")
-    rules = parsed.get("rules")
-    if not isinstance(version, str) or not isinstance(default_action, str) or not isinstance(rules, list):
-        logger.warning("extension.policy.missing_required_fields")
-        return DEFAULT_POLICY_PACK
-    return parsed
 
 
 def _policy_etag(policy_pack: dict[str, Any]) -> str:
