@@ -167,7 +167,9 @@ class AuditEvent(Base):
     phase: Mapped[str] = mapped_column(String(16), nullable=False)
     action: Mapped[str] = mapped_column(String(32), nullable=False)
     allowed: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    category: Mapped[str | None] = mapped_column(String(32))
+    #: Policy categories come from the policy library; four shipped ones already
+    #: exceed 32 characters, and a failed insert here fails the whole decision.
+    category: Mapped[str | None] = mapped_column(String(128))
     decision_severity: Mapped[str | None] = mapped_column(String(16))
     decision_reason: Mapped[str | None] = mapped_column(UnicodeText)
     latency_ms: Mapped[float | None] = mapped_column(Float)
