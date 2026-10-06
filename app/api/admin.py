@@ -330,6 +330,25 @@ def _normalize_expected_severity(value: object) -> str | None:
     return text if text in EVAL_ALLOWED_SEVERITIES else None
 
 
+#: Dataset fields describing the agentic action under test. They are not part
+#: of the prompt, but AGT rules and the artifact builder match on them.
+_EVAL_AGENTIC_FIELDS = (
+    "action",
+    "agent_id",
+    "capability",
+    "classification",
+    "memory_scope",
+    "method",
+    "params",
+    "resource_id",
+    "server_name",
+    "side_effect",
+    "tool_name",
+    "artifact_name",
+    "payload_summary",
+)
+
+
 def _parse_eval_jsonl(raw_text: str) -> list[dict]:
     cases: list[dict] = []
     for line in raw_text.splitlines():
@@ -366,27 +385,35 @@ def _parse_eval_jsonl(raw_text: str) -> list[dict]:
                 ]
             except ValidationError as exc:
                 raise ServiceError("EVAL_BAD_ARTIFACTS", str(exc), 400) from exc
-        cases.append(
-            {
-                "prompt": str(prompt),
-                "label": str(label) if label else None,
-                "expected_action": expected_action,
-                "expected_allowed": expected_allowed,
-                "expected_severity": expected_severity,
-                "phase_focus": payload.get("phase_focus"),
-                "content_type": payload.get("content_type"),
-                "language": payload.get("language"),
-                "artifacts": artifacts,
-            }
-        )
+        case = {
+            "prompt": str(prompt),
+            "label": str(label) if label else None,
+            "expected_action": expected_action,
+            "expected_allowed": expected_allowed,
+            "expected_severity": expected_severity,
+            "phase_focus": payload.get("phase_focus"),
+            "content_type": payload.get("content_type"),
+            "language": payload.get("language"),
+            "artifacts": artifacts,
+        }
+        # Carry the agentic descriptors through. `_build_default_eval_artifact`
+        # reads them to build the artifact that AGT rules match on; dropping
+        # them here left every rule keyed on `method`, `classification` or
+        # `side_effect` unable to fire, so datasets that exercise those rules
+        # silently measured something else.
+        for field in _EVAL_AGENTIC_FIELDS:
+            if field in payload:
+                case[field] = payload[field]
+        cases.append(case)
     return cases
 
 
 def _build_default_eval_artifact(phase: str, prompt: str, case: dict) -> dict | None:
-    expected_action = str(case.get("expected_action") or "").upper()
-    inferred_action = str(case.get("action") or "").strip().lower()
-    if not inferred_action:
-        inferred_action = "write" if expected_action == "STEP_UP_APPROVAL" else "read"
+    # Never derive the action from `expected_action`: doing so fed the answer
+    # back into the input, so STEP_UP cases matched the step-up rules because
+    # of the label rather than because of the case. Unspecified actions fall
+    # back to the least-privilege default and the dataset states the rest.
+    inferred_action = str(case.get("action") or "").strip().lower() or "read"
 
     metadata: dict[str, object] = {
         "agent_id": case.get("agent_id") or "eval-agent",

@@ -107,7 +107,14 @@ PROMPT_INJECTION_CONFIG = {
         {
             "id": "jailbreak",
             "mode": "REGEX",
-            "pattern": "(?i)jailbreak|do anything now|dan\\b",
+            # "DAN" is matched case-sensitively and as a whole token. The
+            # previous pattern ended in a case-insensitive, unanchored
+            # alternative for that acronym, which also matched the Turkish
+            # ablative suffix -dan: "KVKK acisindan ...", "musteri
+            # tarafindan onaylandi" and similar everyday sentences were
+            # blocked outright. The rule is deterministic, so it fired
+            # before any later policy could disagree with it.
+            "pattern": r"(?i:jailbreak|do anything now)|\bDAN\b",
             "block_on_match": True,
         },
         {
