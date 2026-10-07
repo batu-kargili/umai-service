@@ -9,22 +9,11 @@ import uuid
 logger = logging.getLogger("umai.service.async_jobs")
 
 
+from app.core.action_resource import extract_action_resource
+
+
 def _extract_action_resource(request_payload) -> dict | None:
-    if not request_payload.input.artifacts:
-        return None
-    artifact = request_payload.input.artifacts[0]
-    metadata = artifact.metadata or {}
-    return {
-        "artifact_type": artifact.artifact_type,
-        "name": artifact.name,
-        "action": metadata.get("action"),
-        "tool_name": metadata.get("tool_name"),
-        "server_name": metadata.get("server_name"),
-        "method": metadata.get("method"),
-        "memory_scope": metadata.get("memory_scope"),
-        "resource_id": metadata.get("resource_id"),
-        "classification": metadata.get("classification"),
-    }
+    return extract_action_resource(request_payload)
 
 
 def schedule_guardrail_job(job_id: uuid.UUID) -> None:

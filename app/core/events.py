@@ -15,6 +15,7 @@ from app.core.audit_ledger import (
     sign_event_hash,
 )
 from app.core.siem import emit_guardrail_event
+from app.core.action_resource import agent_identity
 from app.core.settings import settings
 from app.models.db import ApprovalRequest, AuditEvent
 from app.models.engine import EngineResponse
@@ -58,8 +59,11 @@ async def record_audit_event(
 ) -> None:
     request_payload_json = None
     message = None
-    conversation_id = None
     redacted = False
+    # The conversation id is an identifier, not request content. Keeping it
+    # behind `store_request_payloads` meant an alert could not be traced back
+    # to the conversation it came from unless the whole payload was stored.
+    conversation_id = request_payload.conversation_id if request_payload else None
     if request_payload is not None and settings.store_request_payloads:
         request_payload_obj = request_payload.model_dump(mode="json")
         if settings.audit_redaction_enabled:
@@ -78,7 +82,6 @@ async def record_audit_event(
                 custom_patterns_json=settings.audit_redaction_patterns_json,
             )
             redacted = redacted or message_changed
-        conversation_id = request_payload.conversation_id
     response_payload_obj = engine_response.model_dump(mode="json")
     if settings.audit_redaction_enabled:
         response_payload_obj, response_changed = redact_payload(
@@ -164,7 +167,13 @@ async def record_audit_event(
         triggering_policy_json=triggering_policy_json,
         run_id=agent_context.run_id if agent_context else None,
         step_id=agent_context.step_id if agent_context else None,
-        agent_id=agent_context.agent_id if agent_context else None,
+        # A verified signed context wins; it is cryptographic. Channels that
+        # sign nothing -- Copilot Studio among them -- report their agent in
+        # the artifact metadata, and without this fallback every alert they
+        # raise is anonymous.
+        agent_id=(
+            agent_context.agent_id if agent_context else agent_identity(action_resource)
+        ),
         agent_did=agent_context.agent_did if agent_context else None,
         action_resource_json=json.dumps(action_resource, separators=(",", ":"), ensure_ascii=True)
         if action_resource

@@ -23,6 +23,7 @@ from app.core.auth import authenticate_api_key
 from app.core.db import get_session, tenant_scope
 from app.core.engine_client import evaluate_engine
 from app.core.errors import ServiceError
+from app.core.action_resource import extract_action_resource
 from app.core.events import record_audit_event
 from app.core.license import license_allows_llm_calls, require_active_license
 from app.core.resolver import resolve_environment, resolve_guardrail, resolve_project
@@ -120,21 +121,7 @@ def _inject_agent_metadata(payload: PublicGuardRequest, verified_agent) -> Publi
 
 
 def _extract_action_resource(payload: PublicGuardRequest) -> dict | None:
-    if not payload.input.artifacts:
-        return None
-    artifact = payload.input.artifacts[0]
-    metadata = artifact.metadata or {}
-    return {
-        "artifact_type": artifact.artifact_type,
-        "name": artifact.name,
-        "action": metadata.get("action"),
-        "tool_name": metadata.get("tool_name"),
-        "server_name": metadata.get("server_name"),
-        "method": metadata.get("method"),
-        "memory_scope": metadata.get("memory_scope"),
-        "resource_id": metadata.get("resource_id"),
-        "classification": metadata.get("classification"),
-    }
+    return extract_action_resource(payload)
 
 
 def _agent_run_to_response(row: AgentRunSession) -> AgentRunSessionResponse:
