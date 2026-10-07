@@ -484,6 +484,8 @@ AlertSeverity = Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 class AlertResponse(BaseModel):
     id: uuid.UUID
+    #: The agent the alert came from. Null only where no channel reported one.
+    agent_id: str | None = None
     workflow: str
     flow: str
     category: str

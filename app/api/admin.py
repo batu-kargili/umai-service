@@ -592,7 +592,15 @@ def _audit_event_to_alert(event: AuditEvent) -> admin_models.AlertResponse:
     )
 
     message = event.message or _extract_message_from_payload(request_payload) or "N/A"
-    workflow = (request_payload or {}).get("conversation_id") or event.project_id or "N/A"
+    # The column is populated for every decision; the stored payload only
+    # exists when `store_request_payloads` is on, so reading it first left
+    # the conversation blank on every alert in the default configuration.
+    workflow = (
+        event.conversation_id
+        or (request_payload or {}).get("conversation_id")
+        or event.project_id
+        or "N/A"
+    )
     flow = event.phase or "N/A"
 
     decision_action = event.action
@@ -616,6 +624,7 @@ def _audit_event_to_alert(event: AuditEvent) -> admin_models.AlertResponse:
 
     return admin_models.AlertResponse(
         id=event.id,
+        agent_id=event.agent_id,
         workflow=workflow,
         flow=flow,
         category=category,
